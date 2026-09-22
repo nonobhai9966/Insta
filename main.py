@@ -223,75 +223,83 @@ def new_id() -> str:
 # Example:  "HEART": "5250903242417415799",
 # ======================================================================================
 PREMIUM_EMOJI_IDS: dict[str, str] = {
+    "INSTA": "5312476345849094587",       # 📸 Instagram
     "SKULL": "6082409105501195897",       # 💀
     "FIRE": "6084629985845317971",        # 🔥
-    "HEART": "5388790256772331442",       # ❤️
-    "EYE": "5465281390931113531",         # 👁️
-    "GEM": "6147439566107186310",         # 💎
-    "DOWN": "6041761071155386269",        # 👇
-    "ROCKET": "6032608126480421344",      # 🚀
-    "PROFILE": "5472363448404809929",     # 👤
-    "WALLET": "5992390297533816030",      # 👛
-    "ORDER": "6030864215139422409",       # 📦
-    "REFER": "5463064457661934722",       # 🔗
-    "BONUS": "6168088385886886324",       # 🎁
-    "LEADER": "5377599075237502153",      # 🏆
-    "REDEEM": "5904248647972820334",      # 🎟️
-    "SUPPORT": "5312486108309757006",     # 💬
-    "ADMIN": "5884161133174067365",       # 🔧
-    "HOME": "5269547387516388870",        # 🏠
-    "BACK": "5267410576862118569",        # ◀️
-    "CANCEL": "5197269100878907942",      # ✖️
-    "CHECK": "6080263490163973583",       # ✅
-    "CROSS": "6080263490163973583",       # ❌
-    "LOADING": "5341715473882955310",     # ⏳
-    "PROCESS": "5854722989240619332",     # ⚙️
-    "DONE": "5454415424319931791",        # ✔️
-    "REFUND": "5774077015388852135",      # ↩️
-    "PARTIAL": "5895507195524550741",     # 🌗
-    "ERROR": "6080263490163973583",       # ❌
-    "WARN": "5039665997506675838",        # ⚠️
-    "INFO": "6195239687368481708",        # 💡
-    "COINS": "5267409292666898509",       # 🪙
-    "DEPOSIT": "5406809207947142040",     # 🏦
-    "CREDIT": "6082586710988820084",      # 💰
-    "MONEY": "5332455502917949981",       # 💸
-    "QUANTITY": "5226929552319594190",    # 🔢
-    "SERVICE": "5433825729060018456",     # 🧭
+    "LIGHTNING": "",   # ⚡
+    "SHIELD": "5463057538469621074",      # 🛡️
+    "CROWN": "",       # 👑
+    "GEM": "5465281390931113531",         # 💎
+    "ROCKET": "6041761071155386269",      # 🚀
     "TARGET": "6109432142079466939",      # 🎯
-    "LINK": "5463064457661934722",        # 🔗
-    "SHIELD": "6030594491193234103",      # 🛡️
-    "TIME": "5260502250815513613",        # 🕒
-    "ID": "5267287216811444804",          # 🆔
+    "LOCK": "5258476306152038031",        # 🔒
+    "STAR": "",        # ⭐
+    "WARN": "5039665997506675838",        # ⚠️
+    "CHECK": "5213395028038132311",       # ✅
+    "CROSS": "5774077015388852135",       # ❌
+    "LOADING": "5454415424319931791",     # ⏳
+    "STATS": "5884161133174067365",       # 📊
+    "REFER": "6030864215139422409",       # 🔗
+    "PROFILE": "6032608126480421344",     # 👤
+    "SUPPORT": "5904248647972820334",     # 💬
+    "ADMIN": "5460713671736960588",       # 🔧
+    "BROADCAST": "5780405967527089720",   # 📢
+    "TIME": "6030594491193234103",        # 🕒
     "NAME": "",        # ✨
-    "STATS": "5433811242135331842",       # 📊
-    "QUEUE": "5863945989127148135",       # 📥
-    "SETTING": "5854722989240619332",     # ⚙️
-    "SEARCH": "5262919351035518271",      # 🔍
-    "BAN": "5458382591121964689",         # 🚫
-    "BROADCAST": "5213395028038132311",   # 📢
-    "MAINTENANCE": "6098031288831187632", # 🛠️
-    "EDIT": "5330115548900501467",        # ✍️
-    "KEY": "5258476306152038031",         # 🔑
-    "COPY": "5433614747381538714",        # 📋
-    "REFRESH": "5780405967527089720",     # 🔄
-    "NEXT": "5260342697075416641",        # ▶️
-    "PLUS": "5469957729848159635",        # ➕
-    "MINUS": "6129450086997959180",       # ➖
-    "POWER": "6194884545112709374",       # 🔌
-    "SEND": "5226794552907554474",        # 📨
-    "PHOTO": "5460713671736960588",       # 🖼️
-    "RETRY": "6100520888099149405",       # 🔁
-    "UPI": "5257974976094412956",         # 📲
-    "SYSTEM": "5449569374065152798",      # 🌀
-    "REFERRAL": "5886568200350472339",    # 🎉
-    "USER": "5472363448404809929",        # 👤
-    "JOIN": "5213395028038132311",        # 📢
-    "HELP": "",        # ❓
-    "LOCK": "5882207227997066107",        # 🔒
-    "SHARE": "5017470156276761427",       # 📤
+    "ID": "5267287216811444804",          # 🆔
+    "REPORT": "5197269100878907942",      # 📋
+    "BACK": "5269547387516388870",        # ◀️
+    "CANCEL": "5260342697075416641",      # ✖️
+    "GIFT": "5463064457661934722",        # 🎁
+    "CREDIT": "5267409292666898509",      # 💰
+    "HEART": "5388790256772331442",       # ❤️
+    "EYE": "5463379454858392371",         # 👁️
+    "ORDER": "5992390297533816030",       # 📦
+    "LINK": "6030864215139422409",        # 🔗
+    "SETTING": "5341715473882955310",     # ⚙️
+    "MAINTENANCE": "5863945989127148135", # 🛠️
+    "NEW_USER": "",    # 👋
+    "REFERRAL": "5260502250815513613",    # 🎉
+    "SYSTEM": "5854722989240619332",      # 🌀
+    "SERVICE": "5433825729060018456",     # 🧭
+    "QUANTITY": "5226929552319594190",    # 🔢
+    "COINS": "5886568200350472339",       # 🪙
+    "ERROR": "5774077015388852135",       # ❌
+    "INFO": "6195239687368481708",        # 💡
+    "DONE": "6080263490163973583",        # ✔️
+    "REFUND": "5895507195524550741",      # ↩️
+    "SHARE": "5433614747381538714",       # 📤
+    "HELP": "6100520888099149405",        # ❓
+    "KEY": "5330115548900501467",         # 🔑
+    "PREMIUM": "",     # 💫
+    "USER": "6032608126480421344",        # 👤
+    "QUEUE": "5433811242135331842",       # 📥
+    "EDIT": "5458382591121964689",        # ✍️
+    "MONEY": "6082586710988820084",       # 💸
+    "DOWN": "6147439566107186310",        # 👇
+    "WALLET": "5472363448404809929",      # 👛
+    "DEPOSIT": "5332455502917949981",     # 🏦
+    "BAN": "5262919351035518271",         # 🚫
+    "SEARCH": "6098031288831187632",      # 🔍
+    "JOIN": "5780405967527089720",        # 📢
+    "BONUS": "5463064457661934722",       # 🎁
+    "LEADER": "6168088385886886324",      # 🏆
+    "REDEEM": "5377599075237502153",      # 🎟️
     "LIST": "",        # 📋
-    "REPORT": "5433614747381538714",      # 📋
+    "COPY": "5197269100878907942",        # 📋
+    "REFRESH": "5017470156276761427",     # 🔄
+    "HOME": "5312486108309757006",        # 🏠
+    "NEXT": "5267410576862118569",        # ▶️
+    "PLUS": "5882207227997066107",        # ➕
+    "MINUS": "5469957729848159635",       # ➖
+    "POWER": "6129450086997959180",       # 🔌
+    "PROCESS": "5341715473882955310",     # ⚙️
+    "PARTIAL": "5449569374065152798",     # 🌗
+    "CHART": "",       # 📈
+    "SEND": "6194884545112709374",        # 📨
+    "PHOTO": "5257974976094412956",       # 🖼️
+    "RETRY": "5226794552907554474",       # 🔁
+    "UPI": "5406809207947142040",         # 📲
 }
 
 DEFAULTS = {
@@ -307,7 +315,7 @@ DEFAULTS = {
     "DOWN": "👇", "WALLET": "👛", "DEPOSIT": "🏦", "BAN": "🚫", "SEARCH": "🔍", "JOIN": "📢",
     "BONUS": "🎁", "LEADER": "🏆", "REDEEM": "🎟️", "LIST": "📋", "COPY": "📋", "REFRESH": "🔄",
     "HOME": "🏠", "NEXT": "▶️", "PLUS": "➕", "MINUS": "➖", "POWER": "🔌", "PROCESS": "⚙️",
-    "PARTIAL": "🌗", "CHART": "📈", "SEND": "📨", "PHOTO": "🖼️", "RETRY": "🔁", "UPI": "📲",
+    "PARTIAL": "🌗", "CHART": "📈", "SEND": "📨", "PHOTO": "🖼️", "RETRY": "🔁", "UPI": "📲", "INSTA": "📸",
 }
 
 
@@ -394,10 +402,27 @@ def progress_bar(done: int, total: int, width: int = 10) -> str:
 # ======================================================================================
 # Buttons (Bot API 9.4 style + icon_custom_emoji_id, 7.11 copy_text)
 # ======================================================================================
+# every button gets a colour: red = back/cancel/delete, green = money/confirm/add, blue = everything else
+_RED_ICONS = {"BACK", "CANCEL", "CROSS", "BAN", "ERROR", "MINUS", "HOME"}
+_GREEN_ICONS = {"CHECK", "DONE", "PLUS", "DEPOSIT", "WALLET", "BONUS", "COINS", "MONEY", "CREDIT", "SEND", "REDEEM", "UPI",
+                "RETRY", "SHARE", "JOIN", "GIFT", "ROCKET", "NEXT"}
+
+
+def auto_style(icon: str | None, text: str) -> str:
+    key = (icon or "").upper()
+    low = text.lower()
+    if key in _RED_ICONS or any(w in low for w in ("delete", "remove", "cancel", "reject", "disable", "turn off", "hide", "ban")):
+        return "danger"
+    if key in _GREEN_ICONS or any(w in low for w in ("confirm", "approve", "add ", "enable", "turn on", "create", "yes")):
+        return "success"
+    return "primary"
+
+
 def btn(text: str, cb: str | None = None, *, url: str | None = None, copy: str | None = None,
         icon: str | None = None, style: str | None = None) -> InlineKeyboardButton:
     api: dict[str, Any] = {}
-    if settings.colored_buttons and style in {"primary", "success", "danger"}:
+    if settings.colored_buttons:
+        style = style if style in {"primary", "success", "danger"} else auto_style(icon, text)
         api["style"] = style
     label = text
     if icon:
@@ -651,15 +676,16 @@ class MongoStore:
     # ---- users -----------------------------------------------------------------------
     async def ensure_user(self, uid: int, username: str | None, full_name: str) -> tuple[dict, bool]:
         now = utcnow()
-        res = await self.users.update_one(
+        marker = uuid4().hex
+        user = await self.users.find_one_and_update(
             {"telegram_id": uid},
             {"$set": {"username": username, "username_lc": (username or "").lower() or None,
                       "full_name": full_name, "last_seen": now, "blocked": False},
              "$setOnInsert": {"telegram_id": uid, "coins": 0, "referrals": 0, "ref_earned": 0, "banned": False,
-                              "orders_count": 0, "spent": 0, "created_at": now}},
-            upsert=True,
+                              "orders_count": 0, "spent": 0, "created_at": now, "insert_marker": marker}},
+            upsert=True, return_document=self._after,
         )
-        return await self.users.find_one({"telegram_id": uid}), res.upserted_id is not None
+        return user, user.get("insert_marker") == marker
 
     async def get_user(self, uid: int) -> dict | None:
         return await self.users.find_one({"telegram_id": uid})
@@ -1208,7 +1234,9 @@ def _not_modified(exc: Exception) -> bool:
 
 class Rich:
     enabled = settings.rich_messages
+    edits = settings.rich_messages
     _send_failures = 0
+    _edit_failures = 0
 
     @classmethod
     def ok(cls) -> None:
@@ -1251,18 +1279,23 @@ async def ui_send(bot, chat_id: int, screen: Screen) -> int:
 
 
 async def ui_edit(bot, chat_id: int, message_id: int, screen: Screen) -> bool:
-    if screen.rich and Rich.enabled:
+    if screen.rich and Rich.enabled and Rich.edits:
         payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "rich_message": {"html": screen.rich}}
         if screen.markup:
             payload["reply_markup"] = screen.markup.to_dict()
         try:
             await bot.do_api_request("editMessageText", api_kwargs=payload)
+            Rich._edit_failures = 0
             return True
         except BadRequest as exc:
             if _not_modified(exc):
                 return True
+            Rich._edit_failures += 1
         except TelegramError:
-            pass
+            Rich._edit_failures += 1
+        if Rich._edit_failures >= 2:
+            Rich.edits = False  # saves one Telegram round-trip on every click from now on
+            log.info("Rich edits rejected twice — using classic edits for this run")
     try:
         await bot.edit_message_text(screen.text, chat_id=chat_id, message_id=message_id, reply_markup=screen.markup)
         return True
@@ -1683,39 +1716,63 @@ def extras(spec: dict) -> str:
     return " · ".join(tags)
 
 
+def bonus_status(user: dict) -> str:
+    last = aware(user.get("last_bonus_at"))
+    if not last:
+        return "ready"
+    left = last + timedelta(hours=C.daily_cooldown_hours) - utcnow()
+    return "ready" if left.total_seconds() <= 0 else f"in {fmt_left(left)}"
+
+
 def home_screen(user: dict, admin: bool) -> Screen:
     gids = groups()
-    lineup = "  ·  ".join(f"{e(GROUPS[g]['emoji_key'])} {fancy(GROUPS[g]['name'])}" for g in gids[:4])
+    name = esc((user.get("full_name") or "Friend")[:24])
+    coins, orders, bonus = fmt_num(user.get("coins", 0)), user.get("orders_count", 0), bonus_status(user)
+    svc_lines = []
+    rich_items = []
+    for gid in gids[:8]:
+        g = GROUPS[gid]
+        low = min(float(SERVICES[k]["rate_per_1k"]) for k in subs_of(gid))
+        svc_lines.append(f"{e(g['emoji_key'])} <b>{esc(g['name'])}</b> — from <code>{fmt_num(low)}</code>/K")
+        rich_items.append(f"<li>{pe(g['emoji_key'])} <b>{esc(g['name'])}</b> — from {fmt_num(low)} coins / 1K</li>")
     text = (
-        f"{e('SKULL')} <b>{fancy('Welcome To')} {esc(C.bot_name)}</b> {e('SKULL')}\n{HR}\n\n"
-        f"{e('FIRE')} <b>{fancy('The Premium Instagram Growth Panel')}</b>\n\n"
-        + (f"{lineup}\n\n" if lineup else "") +
-        f"{e('GEM')} <b>{fancy('Balance')}:</b> <code>{fmt_num(user.get('coins', 0))} coins</code>\n"
-        f"{e('ORDER')} <b>{fancy('Orders')}:</b> <code>{user.get('orders_count', 0)}</code>\n\n"
-        f"{e('INFO')} <i>Tip: just paste an Instagram link here to order instantly.</i>\n\n"
-        f"{e('DOWN')} <b>{fancy('Choose An Option Below')}</b>"
+        f"{e('SKULL')} <b>{fancy(C.bot_name)}</b> {e('SKULL')}\n"
+        f"{e('INSTA')} <i>{fancy('Premium Instagram Growth Panel')}</i>\n\n"
+        f"<blockquote>{e('PROFILE')} <b>{name}</b>\n"
+        f"{e('GEM')} {fancy('Balance')}: <b>{coins}</b> coins\n"
+        f"{e('ORDER')} {fancy('Orders')}: <b>{orders}</b>  ·  {e('BONUS')} {fancy('Bonus')}: <b>{bonus}</b></blockquote>\n\n"
+        + (f"{e('SERVICE')} <b>{fancy('Services')}</b>\n<blockquote>" + "\n".join(svc_lines) + "</blockquote>\n\n" if svc_lines else "")
+        + f"{e('INFO')} <i>Paste any Instagram link here to order instantly.</i>\n"
+        f"{e('DOWN')} <b>{fancy('Choose An Option')}</b>"
     )
+    rich = (f"<h2>{pe('SKULL')} {esc(C.bot_name)}</h2><p><i>{pe('INSTA')} Premium Instagram Growth Panel</i></p>"
+            f"<table><tr><td><b>{pe('PROFILE')} Account</b></td><td>{name}</td></tr>"
+            f"<tr><td><b>{pe('GEM')} Balance</b></td><td>{coins} coins</td></tr>"
+            f"<tr><td><b>{pe('ORDER')} Orders</b></td><td>{orders}</td></tr>"
+            f"<tr><td><b>{pe('BONUS')} Daily bonus</b></td><td>{bonus}</td></tr></table>"
+            + (f"<p><b>{pe('SERVICE')} Services</b></p><ul>{''.join(rich_items)}</ul>" if rich_items else "")
+            + f"<p><i>{pe('INFO')} Paste any Instagram link here to order instantly.</i></p>")
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for gid in gids[:12]:
         g, kinds = GROUPS[gid], subs_of(gid)
         single = len(kinds) == 1
-        label = f"{g['name']} · {fmt_num(SERVICES[kinds[0]]['rate_per_1k'])}/K" if single else g["name"]
-        row.append(btn(label, f"svc:{kinds[0]}" if single else f"grp:{gid}", icon=g["emoji_key"], style=g["style"]))
+        label = re.sub(r"^(instagram|insta|ig)\s+", "", g["name"], flags=re.I) or g["name"]
+        row.append(btn(label[:18], f"svc:{kinds[0]}" if single else f"grp:{gid}", icon=g["emoji_key"], style=g["style"]))
         if len(row) == 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
     rows += [
-        [btn("Profile", "profile", icon="PROFILE"), btn("Wallet", "wallet", icon="WALLET", style="success")],
-        [btn("My Orders", "orders:0", icon="ORDER"), btn("Referral", "ref", icon="REFER")],
-        [btn("Daily Bonus", "bonus", icon="BONUS", style="success"), btn("Leaderboard", "lb", icon="LEADER")],
-        [btn("Redeem Code", "redeem", icon="REDEEM"), btn("Support", "support", icon="SUPPORT")],
+        [btn("Wallet", "wallet", icon="WALLET", style="success"), btn("Orders", "orders:0", icon="ORDER", style="primary"),
+         btn("Profile", "profile", icon="PROFILE", style="danger")],
+        [btn("Bonus", "bonus", icon="BONUS", style="danger"), btn("Refer", "ref", icon="REFER", style="success"),
+         btn("Top", "lb", icon="LEADER", style="primary")],
+        [btn("Redeem", "redeem", icon="REDEEM", style="primary"), btn("Support", "support", icon="SUPPORT", style="danger")]
+        + ([btn("Admin", "a", icon="ADMIN", style="success")] if admin else []),
     ]
-    if admin:
-        rows.append([btn("Admin Panel", "a", icon="ADMIN", style="primary")])
-    return Screen(text, kb(*rows))
+    return Screen(text, kb(*rows), rich)
 
 
 def group_screen(gid: str) -> Screen:
@@ -1739,7 +1796,7 @@ def group_screen(gid: str) -> Screen:
 
 
 def pick_service_screen(link: str) -> Screen:
-    text = title("LINK", "Link Detected") + f"<code>{esc(link)}</code>\n\n{e('DOWN')} Which service do you want for this post?"
+    text = title("INSTA", "Link Detected") + f"<code>{esc(link)}</code>\n\n{e('DOWN')} Which service do you want for this post?"
     rows = [[btn(svc_label(k), f"svc:{k}", icon=s["emoji_key"], style=s["style"])] for k, s in SERVICES.items() if is_live(k)]
     return Screen(text, kb(*rows[:14], cancel_btn()))
 
@@ -1756,7 +1813,7 @@ def _svc_header(spec: dict) -> str:
 def link_prompt(kind: str, error: str | None = None) -> Screen:
     spec = service(kind)
     text = (_svc_header(spec) +
-            f"{e('LINK')} <b>Step 1/2</b> — send the <b>public</b> Instagram post or reel link.\n\n"
+            f"{e('INSTA')} <b>Step 1/2</b> — send the <b>public</b> Instagram post or reel link.\n\n"
             f"{e('TARGET')} Example:\n<code>https://www.instagram.com/reel/ABC123xyz/</code>\n\n"
             f"{e('SHIELD')} Accepted: /p/, /reel/, /tv/ links. Private accounts can't receive {spec['unit']}.")
     if error:
@@ -2202,6 +2259,7 @@ def admin_group_screen(gid: str, note: str | None = None) -> Screen:
                  icon="LIGHTNING" if SERVICES[k].get("mode") == "auto" else "EDIT")] for k in subs]
     return Screen(text, kb(*rows, [btn("Add Sub-service", f"a:subadd:{gid}", icon="PLUS", style="success")],
                            [btn("Name", f"a:gf:name:{gid}", icon="EDIT"), btn("Description", f"a:gf:desc:{gid}", icon="EDIT")],
+                           [btn("Button Emoji", f"a:ge:{gid}", icon=g["emoji_key"]), btn("Button Colour", f"a:gc:{gid}", icon="STAR")],
                            [btn("Hide" if g.get("enabled", True) else "Show", f"a:gx:{gid}", icon="POWER",
                                 style="danger" if g.get("enabled", True) else "success"),
                             btn("Delete Service", f"a:gdel:{gid}", icon="CROSS", style="danger")],
@@ -2487,9 +2545,18 @@ def route(*names: str, admin: bool = False):
     return deco
 
 
-async def touch_user(update: Update) -> tuple[dict, bool]:
+_user_cache: dict[int, tuple[float, dict]] = {}
+
+
+async def touch_user(update: Update, fresh: bool = False) -> tuple[dict, bool]:
+    """Upsert the user at most once a minute; other clicks use the cached copy (ban state is invalidated instantly)."""
     tg = update.effective_user
-    return await store.ensure_user(tg.id, tg.username, tg.full_name)
+    hit = _user_cache.get(tg.id)
+    if hit and not fresh and time.monotonic() - hit[0] < 60 and hit[1].get("username") == tg.username:
+        return hit[1], False
+    user, is_new = await store.ensure_user(tg.id, tg.username, tg.full_name)
+    _user_cache[tg.id] = (time.monotonic(), user)
+    return user, is_new
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2522,13 +2589,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
     if ":".join(parts[:1]) not in KEEP_AWAIT:
         context.user_data.pop(AWAIT, None)  # navigating away cancels any pending text input
+    task = asyncio.ensure_future(fn(update, context, args))
+    done, _ = await asyncio.wait({task}, timeout=0.35)
+    answered_early = not done
+    if answered_early:
+        await safe_answer(query)  # stop the spinner now; the screen update follows
     try:
-        result = await fn(update, context, args)
+        result = await task
     except Exception:
-        await safe_answer(query, "Something went wrong. Please try again.", True)
+        if not answered_early:
+            await safe_answer(query, "Something went wrong. Please try again.", True)
         raise
     toast, alert = (result if isinstance(result, tuple) else (result, False))
-    await safe_answer(query, toast, alert)
+    if not answered_early:
+        await safe_answer(query, toast, alert)
+    elif toast and alert:
+        try:
+            await context.bot.send_message(update.effective_chat.id, esc(toast))
+        except TelegramError:
+            pass
 
 
 def set_await(context: ContextTypes.DEFAULT_TYPE, kind: str, **data) -> None:
@@ -2539,8 +2618,13 @@ def clear_await(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(AWAIT, None)
 
 
+_maint_cache: list[float | bool] = [0.0, False]
+
+
 async def maintenance_on() -> bool:
-    return bool(await store.get_setting("maintenance", False))
+    if time.monotonic() - float(_maint_cache[0]) > 15:
+        _maint_cache[:] = [time.monotonic(), bool(await store.get_setting("maintenance", False))]
+    return bool(_maint_cache[1])
 
 
 async def go_home(update: Update, context: ContextTypes.DEFAULT_TYPE, *, force_new: bool = False) -> None:
@@ -3184,6 +3268,7 @@ async def cb_admin_user_ban(update, context, args):
     if ban and is_admin(uid):
         return "You can't ban an admin.", True
     await store.set_banned(uid, ban)
+    _user_cache.pop(uid, None)
     await show_admin_user(update, context, uid, "User banned." if ban else "User unbanned.")
     return "🚫 Banned" if ban else "✅ Unbanned"
 
@@ -3260,6 +3345,7 @@ async def run_broadcast(app: Application, src: dict, admin_chat: int, panel_id: 
 async def cb_admin_maintenance(update, context, args):
     now_on = not await maintenance_on()
     await store.set_setting("maintenance", now_on)
+    _maint_cache[:] = [time.monotonic(), now_on]
     await render(update, context, admin_screen(await store.stats(), now_on))
     return "🛠 Maintenance ON" if now_on else "✅ Maintenance OFF"
 
@@ -3432,6 +3518,37 @@ async def in_group_field(update, context, state, text):
     await save_services()
     clear_await(context)
     await render(update, context, admin_group_screen(gid, f"{label} updated."))
+
+
+EMOJI_CHOICES = ("INSTA", "HEART", "EYE", "USER", "FIRE", "ROCKET", "GEM", "STAR", "SUPPORT", "SHARE", "PHOTO", "CROWN")
+
+
+@route("a:ge", admin=True)
+async def cb_admin_group_emoji(update, context, args):
+    gid = args[0] if args else ""
+    if gid not in GROUPS:
+        return None
+    if len(args) > 1 and args[1] in EMOJI_CHOICES:
+        GROUPS[gid]["emoji_key"] = args[1]
+        await save_services()
+        await render(update, context, admin_group_screen(gid, "Button emoji updated."))
+        return "✅ Emoji set"
+    picks = [btn(k.title(), f"a:ge:{gid}:{k}", icon=k) for k in EMOJI_CHOICES]
+    rows = [picks[i:i + 3] for i in range(0, len(picks), 3)]
+    await render(update, context, Screen(title(GROUPS[gid]["emoji_key"], "Choose Button Emoji") +
+                                         f"Service: <b>{esc(GROUPS[gid]['name'])}</b>", kb(*rows, [btn("Back", f"a:g:{gid}", icon="BACK", style="danger")])))
+
+
+@route("a:gc", admin=True)
+async def cb_admin_group_colour(update, context, args):
+    gid = args[0] if args else ""
+    if gid not in GROUPS:
+        return None
+    order = list(STYLES)
+    GROUPS[gid]["style"] = order[(order.index(GROUPS[gid].get("style", "primary")) + 1) % len(order)]
+    await save_services()
+    await render(update, context, admin_group_screen(gid, f"Button colour: {GROUPS[gid]['style']}."))
+    return {"danger": "🔴 Red", "primary": "🔵 Blue", "success": "🟢 Green"}[GROUPS[gid]["style"]]
 
 
 @route("a:gx", admin=True)
@@ -4156,7 +4273,7 @@ async def in_code_wizard(update, context, state, text):
 # Commands
 # ======================================================================================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user, is_new = await touch_user(update)
+    user, is_new = await touch_user(update, fresh=True)
     await clean_input(update)
     clear_await(context)
     context.user_data.pop(ORDER, None)
@@ -4233,6 +4350,31 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             pass
 
 
+async def probe_rich(bot) -> None:
+    """Silently test Rich Messages once (send, rich->classic edit, classic->rich edit) so the
+    single-message flow never breaks: if any step fails, the bot sticks to classic HTML."""
+    Rich.enabled = Rich.edits = False
+    if not settings.rich_messages:
+        return
+    chat = settings.owner_id or next(iter(sorted(all_admin_ids())), 0)
+    if not chat:
+        return
+    test, mid = "<h2>Rich check</h2><p>This message deletes itself.</p>", None
+    try:
+        res = await bot.do_api_request("sendRichMessage", api_kwargs={
+            "chat_id": chat, "rich_message": {"html": test}, "disable_notification": True})
+        mid = int(res["message_id"])
+        await bot.edit_message_text("✓", chat_id=chat, message_id=mid)
+        await bot.do_api_request("editMessageText", api_kwargs={"chat_id": chat, "message_id": mid, "rich_message": {"html": test}})
+        Rich.enabled = Rich.edits = True
+        log.info("Rich Messages: supported ✅")
+    except (TelegramError, KeyError, TypeError, ValueError) as exc:
+        log.info("Rich Messages not available (%s) — using classic HTML", exc)
+    finally:
+        if mid:
+            await safe_delete(bot, chat, mid)
+
+
 async def post_init(app: Application) -> None:
     await store.ensure_indexes()
     await load_runtime()
@@ -4259,6 +4401,7 @@ async def post_init(app: Application) -> None:
                 pass  # admin hasn't started the bot yet
     except TelegramError as exc:
         log.warning("Could not set bot commands: %s", exc)
+    await probe_rich(app.bot)
     app.bot_data["bg_task"] = asyncio.create_task(background_loop(app))
     log.info("%s ready as @%s · storage=%s · rich=%s · drafts=%s", C.bot_name, app.bot.username,
              type(store).__name__, Rich.enabled, Draft.enabled)
@@ -4279,7 +4422,7 @@ def build_application() -> Application:
         update_interval=30,
     )
     defaults = Defaults(parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True))
-    app = (Application.builder().token(settings.bot_token).defaults(defaults).persistence(persistence)
+    app = (Application.builder().token(settings.bot_token).defaults(defaults).persistence(persistence).concurrent_updates(32)
            .connect_timeout(20).read_timeout(30).write_timeout(30).pool_timeout(20)
            .post_init(post_init).post_shutdown(post_shutdown).build())
     private = filters.ChatType.PRIVATE
