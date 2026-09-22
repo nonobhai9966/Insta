@@ -173,7 +173,8 @@ def config_defaults() -> dict[str, Any]:
             "upi_id": settings.upi_id, "currency": settings.currency,
             "coin_packages": [list(p) for p in settings.coin_packages],
             "referral_bonus": settings.referral_bonus, "daily_bonus": settings.daily_bonus,
-            "daily_cooldown_hours": settings.daily_cooldown_hours, "deposit_expiry_minutes": settings.deposit_expiry_minutes}
+            "daily_cooldown_hours": settings.daily_cooldown_hours, "deposit_expiry_minutes": settings.deposit_expiry_minutes,
+            "log_channel": (os.getenv("LOG_CHANNEL") or "").strip(), "draft_effects": settings.message_drafts}
 
 
 def cfg(key: str) -> Any:
@@ -649,9 +650,19 @@ class MongoStore:
             self.client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=15_000, tz_aware=True)
         self._after = ReturnDocument.AFTER
         self._dup = DuplicateKeyError
+        self._ucache: dict[int, tuple[float, dict]] = {}   # telegram_id -> (time, user doc)
         db = self.client[dbname]
         self.users, self.orders, self.deposits = db.users, db.orders, db.deposits
         self.codes, self.code_uses, self.ledger, self.kv = db.redeem_codes, db.redeem_uses, db.ledger, db.settings
+
+    def _remember(self, user: dict | None) -> dict | None:
+        if user:
+            self._ucache[int(user["telegram_id"])] = (time.monotonic(), user)
+            return dict(user)
+        return None
+
+    def _forget(self, uid: int) -> None:
+        self._ucache.pop(uid, None)
 
     async def close(self) -> None:
         result = self.client.close()
@@ -685,10 +696,13 @@ class MongoStore:
                               "orders_count": 0, "spent": 0, "created_at": now, "insert_marker": marker}},
             upsert=True, return_document=self._after,
         )
-        return user, user.get("insert_marker") == marker
+        return self._remember(user), user.get("insert_marker") == marker
 
     async def get_user(self, uid: int) -> dict | None:
-        return await self.users.find_one({"telegram_id": uid})
+        hit = self._ucache.get(uid)
+        if hit and time.monotonic() - hit[0] < 300:
+            return dict(hit[1])
+        return self._remember(await self.users.find_one({"telegram_id": uid}))
 
     async def find_user(self, query: str) -> dict | None:
         query = query.strip()
@@ -702,6 +716,7 @@ class MongoStore:
         if delta < 0:
             flt["coins"] = {"$gte": -delta}
         user = await self.users.find_one_and_update(flt, {"$inc": {"coins": delta}}, return_document=self._after)
+        self._remember(user)
         if user and delta:
             await self.ledger.insert_one({"user_id": uid, "delta": delta, "balance": user["coins"],
                                           "reason": reason, "ref": ref, "at": utcnow()})
@@ -720,14 +735,16 @@ class MongoStore:
         return await _to_list(self.ledger.find({"user_id": uid}).sort("at", -1), limit)
 
     async def set_banned(self, uid: int, banned: bool) -> dict | None:
-        return await self.users.find_one_and_update({"telegram_id": uid}, {"$set": {"banned": banned}},
-                                                    return_document=self._after)
+        return self._remember(await self.users.find_one_and_update({"telegram_id": uid}, {"$set": {"banned": banned}},
+                                                                   return_document=self._after))
 
     async def mark_blocked(self, uid: int) -> None:
+        self._forget(uid)
         await self.users.update_one({"telegram_id": uid}, {"$set": {"blocked": True}})
 
     async def bump_order_stats(self, uid: int, coins: int) -> None:
-        await self.users.update_one({"telegram_id": uid}, {"$inc": {"orders_count": 1, "spent": coins}})
+        self._remember(await self.users.find_one_and_update({"telegram_id": uid}, {"$inc": {"orders_count": 1, "spent": coins}},
+                                                            return_document=self._after))
 
     async def claim_daily(self, uid: int, amount: int, hours: int) -> tuple[bool, dict | None, datetime | None]:
         now = utcnow()
@@ -738,6 +755,7 @@ class MongoStore:
             {"$inc": {"coins": amount}, "$set": {"last_bonus_at": now}},
             return_document=self._after,
         )
+        self._remember(user)
         if user:
             await self.ledger.insert_one({"user_id": uid, "delta": amount, "balance": user["coins"],
                                           "reason": "daily_bonus", "ref": None, "at": now})
@@ -754,11 +772,13 @@ class MongoStore:
             return False
         claimed = await self.users.find_one_and_update(
             {"telegram_id": new_uid, "referred_by": {"$exists": False}}, {"$set": {"referred_by": referrer_id}})
+        self._forget(new_uid)
         if not claimed:
             return False
         ref = await self.users.find_one_and_update(
             {"telegram_id": referrer_id}, {"$inc": {"coins": bonus, "referrals": 1, "ref_earned": bonus}},
             return_document=self._after)
+        self._remember(ref)
         if ref and bonus:
             await self.ledger.insert_one({"user_id": referrer_id, "delta": bonus, "balance": ref["coins"],
                                           "reason": "referral", "ref": str(new_uid), "at": utcnow()})
@@ -1235,6 +1255,7 @@ def _not_modified(exc: Exception) -> bool:
 class Rich:
     enabled = settings.rich_messages
     edits = settings.rich_messages
+    custom_emoji = True     # premium <tg-emoji> inside rich HTML (verified at startup)
     _send_failures = 0
     _edit_failures = 0
 
@@ -1251,9 +1272,14 @@ class Rich:
             log.warning("Rich Messages disabled for this run (API rejected them 3x): %s", exc)
 
 
+def re_(key: str) -> str:
+    """Emoji for rich messages: premium when Telegram accepts it there, plain unicode otherwise."""
+    return e(key) if Rich.custom_emoji else pe(key)
+
+
 def rich_card(key: str, heading: str, rows: list[tuple[str, str]] | None = None,
               paragraphs: list[str] | None = None, footer: str | None = None) -> str:
-    parts = [f"<h2>{pe(key)} {esc(heading)}</h2>"]
+    parts = [f"<h2>{re_(key)} {esc(heading)}</h2>"]
     for para in paragraphs or []:
         parts.append(f"<p>{para}</p>")
     if rows:
@@ -1338,7 +1364,8 @@ async def render(update: Update, context: ContextTypes.DEFAULT_TYPE, screen: Scr
 async def clean_input(update: Update, *, force: bool = False) -> None:
     msg = update.effective_message
     if msg and (settings.clean_chat or force) and update.effective_chat.type == "private":
-        await safe_delete(msg.get_bot(), msg.chat_id, msg.message_id)
+        # fire-and-forget: the panel edit doesn't wait for the delete round-trip
+        asyncio.get_running_loop().create_task(safe_delete(msg.get_bot(), msg.chat_id, msg.message_id))
 
 
 async def safe_answer(query, text: str | None = None, alert: bool = False) -> None:
@@ -1378,7 +1405,7 @@ class Draft:
             await asyncio.sleep(self.interval)
 
     async def __aenter__(self) -> "Draft":
-        if Draft.enabled and self.chat_id > 0:
+        if Draft.enabled and self.chat_id > 0 and cfg("draft_effects"):
             self._task = asyncio.create_task(self._run())
         return self
 
@@ -1395,6 +1422,54 @@ class Draft:
                 pass
 
 
+class busy:
+    """`async with busy(bot, chat, "GIFT", "Opening your bonus"):` — animated draft bubble while work runs."""
+
+    def __init__(self, bot, chat_id: int, key: str, text: str, min_time: float = 0.45):
+        dots = ("", " ·", " · ·", " · · ·")
+        self.draft = Draft(bot, chat_id, [f"{pe(key)} <b>{esc(text)}</b>{d}" for d in dots], interval=0.3)
+        self.min_time, self.t0 = min_time, 0.0
+
+    async def __aenter__(self) -> "busy":
+        self.t0 = time.monotonic()
+        await self.draft.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        if self.draft._task:
+            left = self.min_time - (time.monotonic() - self.t0)
+            if left > 0:
+                await asyncio.sleep(left)
+        await self.draft.__aexit__(*exc_info)
+
+
+def _plain(html_text: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", "", html_text))
+
+
+async def stream_typing(bot, chat_id: int, html_text: str, steps: int = 6, delay: float = 0.08) -> None:
+    """Typewriter preview of a message through a live draft, before the real message appears."""
+    if not (Draft.enabled and cfg("draft_effects") and chat_id > 0):
+        return
+    text, draft_id = _plain(html_text), random.randint(1, 2**31 - 1)
+    try:
+        for i in range(1, steps + 1):
+            cut = max(1, len(text) * i // steps)
+            await bot.do_api_request("sendMessageDraft", api_kwargs={"chat_id": chat_id, "draft_id": draft_id,
+                                                                    "text": text[:cut] + ("" if i == steps else " ▍")})
+            await asyncio.sleep(delay)
+    except TelegramError as exc:
+        log.info("Message drafts unavailable (%s) — disabled for this run", exc)
+        Draft.enabled = False
+
+
+async def clear_draft(bot, chat_id: int) -> None:
+    try:
+        await bot.do_api_request("sendMessageDraft", api_kwargs={"chat_id": chat_id, "draft_id": 1, "text": ""})
+    except TelegramError:
+        pass
+
+
 # ======================================================================================
 # Small runtime helpers: throttling, per-user locks, force-join cache
 # ======================================================================================
@@ -1402,7 +1477,35 @@ _last_click: dict[int, float] = {}
 _user_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 _join_cache: dict[int, float] = {}
 _refresh_cache: dict[str, float] = {}
-BG: dict[str, Any] = {"broadcast": False}
+BG: dict[str, Any] = {"broadcast": False, "bot": None, "log_warned": False}
+
+
+def log_event(key: str, heading: str, body: str = "") -> None:
+    """Fire-and-forget post to the admin log channel (never slows down or breaks the user flow)."""
+    chat, bot = cfg("log_channel"), BG.get("bot")
+    if not chat or bot is None:
+        return
+    text = f"{e(key)} <b>{esc(heading)}</b>" + (f"\n{body}" if body else "") + f"\n<i>{utcnow().strftime('%d %b %H:%M UTC')}</i>"
+
+    async def _send() -> None:
+        try:
+            await bot.send_message(chat, text[:4000], disable_notification=True)
+        except TelegramError as exc:
+            if not BG["log_warned"]:
+                BG["log_warned"] = True
+                log.warning("Log channel %s unavailable: %s", chat, exc)
+
+    try:
+        asyncio.get_running_loop().create_task(_send())
+    except RuntimeError:
+        pass
+
+
+def who(user: dict | None, uid: int | None = None) -> str:
+    uid = uid or (user or {}).get("telegram_id")
+    name = esc(((user or {}).get("full_name") or "User")[:30])
+    tag = f" @{esc(user['username'])}" if user and user.get("username") else ""
+    return f'<a href="tg://user?id={uid}">{name}</a>{tag} · <code>{uid}</code>'
 
 
 def throttled(uid: int, gap: float = 0.35) -> bool:
@@ -1603,6 +1706,7 @@ async def apply_provider_status(bot, order: dict, info: dict) -> str | None:
         if await store.transition_order(oid, ["processing"], "completed", remains=0, start_count=start, completed_at=utcnow()):
             await notify(bot, uid, f"{e('DONE')} <b>{fancy('Order Completed')}</b>\n\n<code>#{oid}</code> · {esc(label)} · "
                                    f"<b>{qty:,}</b> delivered. Thank you!", _order_markup(oid))
+            log_event("DONE", "Order completed", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins")
             return "completed"
     elif status == "partial":
         remains = max(0, min(qty, remains or 0))
@@ -1612,12 +1716,14 @@ async def apply_provider_status(bot, order: dict, info: dict) -> str | None:
             await notify(bot, uid, f"{e('PARTIAL')} <b>{fancy('Order Partially Completed')}</b>\n\n<code>#{oid}</code> · "
                                    f"{qty - remains:,}/{qty:,} delivered.\n{e('REFUND')} <b>{refund}</b> coins refunded.",
                          _order_markup(oid))
+            log_event("PARTIAL", "Order partial", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins" + f"\nRefunded {refund} coins")
             return "partial"
     elif status in ("canceled", "cancelled", "refunded", "fail", "failed", "error"):
         if await refund_order(bot, order, "refunded", int(order["coins"]), "order_refund", ["processing"],
                               provider_status=status, completed_at=utcnow()):
             await notify(bot, uid, f"{e('REFUND')} <b>{fancy('Order Cancelled')}</b>\n\n<code>#{oid}</code> was cancelled by the "
                                    f"provider. <b>{order['coins']}</b> coins returned to your wallet.", _order_markup(oid))
+            log_event("REFUND", "Order cancelled by provider", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins")
             return "refunded"
     elif status and (status != order.get("provider_status") or remains != order.get("remains")):
         await store.update_order(oid, provider_status=status, remains=remains, start_count=start)
@@ -1734,7 +1840,7 @@ def home_screen(user: dict, admin: bool) -> Screen:
         g = GROUPS[gid]
         low = min(float(SERVICES[k]["rate_per_1k"]) for k in subs_of(gid))
         svc_lines.append(f"{e(g['emoji_key'])} <b>{esc(g['name'])}</b> — from <code>{fmt_num(low)}</code>/K")
-        rich_items.append(f"<li>{pe(g['emoji_key'])} <b>{esc(g['name'])}</b> — from {fmt_num(low)} coins / 1K</li>")
+        rich_items.append(f"<li>{re_(g['emoji_key'])} <b>{esc(g['name'])}</b> — from {fmt_num(low)} coins / 1K</li>")
     text = (
         f"{e('SKULL')} <b>{fancy(C.bot_name)}</b> {e('SKULL')}\n"
         f"{e('INSTA')} <i>{fancy('Premium Instagram Growth Panel')}</i>\n\n"
@@ -1745,13 +1851,13 @@ def home_screen(user: dict, admin: bool) -> Screen:
         + f"{e('INFO')} <i>Paste any Instagram link here to order instantly.</i>\n"
         f"{e('DOWN')} <b>{fancy('Choose An Option')}</b>"
     )
-    rich = (f"<h2>{pe('SKULL')} {esc(C.bot_name)}</h2><p><i>{pe('INSTA')} Premium Instagram Growth Panel</i></p>"
-            f"<table><tr><td><b>{pe('PROFILE')} Account</b></td><td>{name}</td></tr>"
-            f"<tr><td><b>{pe('GEM')} Balance</b></td><td>{coins} coins</td></tr>"
-            f"<tr><td><b>{pe('ORDER')} Orders</b></td><td>{orders}</td></tr>"
-            f"<tr><td><b>{pe('BONUS')} Daily bonus</b></td><td>{bonus}</td></tr></table>"
-            + (f"<p><b>{pe('SERVICE')} Services</b></p><ul>{''.join(rich_items)}</ul>" if rich_items else "")
-            + f"<p><i>{pe('INFO')} Paste any Instagram link here to order instantly.</i></p>")
+    rich = (f"<h2>{re_('SKULL')} {esc(C.bot_name)}</h2><p><i>{re_('INSTA')} Premium Instagram Growth Panel</i></p>"
+            f"<table><tr><td><b>{re_('PROFILE')} Account</b></td><td>{name}</td></tr>"
+            f"<tr><td><b>{re_('GEM')} Balance</b></td><td>{coins} coins</td></tr>"
+            f"<tr><td><b>{re_('ORDER')} Orders</b></td><td>{orders}</td></tr>"
+            f"<tr><td><b>{re_('BONUS')} Daily bonus</b></td><td>{bonus}</td></tr></table>"
+            + (f"<p><b>{re_('SERVICE')} Services</b></p><ul>{''.join(rich_items)}</ul>" if rich_items else "")
+            + f"<p><i>{re_('INFO')} Paste any Instagram link here to order instantly.</i></p>")
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for gid in gids[:12]:
@@ -2133,10 +2239,10 @@ def admin_queue_screen(status: str, rows: list[dict]) -> Screen:
     head = title("QUEUE" if status == "pending" else "PROCESS", f"{status.title()} Orders")
     if not rows:
         return Screen(head + f"{e('DONE')} Queue is clear.", kb([btn("Back", "a", icon="BACK", style="danger")]))
-    lines = [f"<code>#{o['order_id']}</code> · {esc(order_svc(o)['short'])} · {o['quantity']:,} · "
+    lines = [f"<code>#{esc(order_no(o))}</code> · {esc(order_svc(o)['short'])} · {o['quantity']:,} · "
              f"<code>{o['user_id']}</code>" + (f"\n   {e('WARN')} <i>{esc(o['provider_error'][:80])}</i>" if o.get("provider_error") else "")
              for o in rows]
-    buttons = [[btn(f"#{o['order_id']} · {fmt_short(o['quantity'])}", f"a:o:{o['order_id']}", icon="ORDER")] for o in rows[:12]]
+    buttons = [[btn(f"#{order_no(o)} · {fmt_short(o['quantity'])}", f"a:o:{o['order_id']}", icon="ORDER")] for o in rows[:12]]
     return Screen(head + "\n".join(lines), kb(*buttons, [btn("Refresh", f"a:q:{status}", icon="REFRESH"), btn("Back", "a", icon="BACK", style="danger")]))
 
 
@@ -2161,17 +2267,18 @@ def admin_order_actions(o: dict, back: bool = True) -> InlineKeyboardMarkup:
     return kb(*rows)
 
 
+def order_no(o: dict) -> str:
+    """Order number shown to admins/logs: the panel order ID when it exists, otherwise the bot's own ID."""
+    return str(o.get("external_id") or o.get("provider_order_id") or o["order_id"])
+
+
 def admin_order_text(o: dict, user: dict | None, note: str | None = None) -> str:
     spec = order_svc(o)
-    host = urlparse(o.get("provider_url") or spec.get("api_url") or "").hostname or "—"
-    text = (title(ORDER_STATUS_ICON.get(o["status"], "ORDER"), f"Order #{o['order_id']}") +
+    text = (f"{e(ORDER_STATUS_ICON.get(o['status'], 'ORDER'))} <b>{fancy('Order')} #{esc(order_no(o))}</b>\n{HR}\n\n" +
             f"<b>User:</b> {esc((user or {}).get('full_name', 'User'))} · <code>{o['user_id']}</code>\n"
-            f"<b>Service:</b> {esc(spec['label'])} · {mode_badge(spec)}\n"
-            + ("" if o.get("manual") else f"<b>API:</b> {esc(host)} · service ID <code>{esc(o.get('provider_service') or spec.get('service_id') or '—')}</code>\n") +
+            f"<b>Service:</b> {esc(spec['label'])} · {mode_badge(spec)}\n" +
             f"<b>Quantity:</b> {o['quantity']:,} · <b>Coins:</b> {o['coins']}\n"
             f"<b>Status:</b> {esc(o['status'].title())}"
-            + (f" · panel ID <code>{esc(o.get('external_id') or o.get('provider_order_id'))}</code>"
-               if o.get("external_id") or o.get("provider_order_id") else "")
             + (f"\n<b>Comments:</b> {len(o['comments'].splitlines())} lines" if o.get("comments") else "")
             + (f"\n{e('RETRY')} <b>Refill requested</b>" if o.get("refill_status") == "requested" else "")
             + f"\n<b>Link:</b> <code>{esc(o['link'])}</code>")
@@ -2394,11 +2501,14 @@ CONFIG_FIELDS: dict[str, tuple[str, str]] = {
     "daily_bonus": ("Daily bonus (coins)", "int0"),
     "daily_cooldown_hours": ("Daily bonus cooldown (hours)", "int"),
     "deposit_expiry_minutes": ("Deposit expiry (minutes)", "int"),
+    "log_channel": ("Log channel ID", "chat"),
+    "draft_effects": ("Draft animations", "bool"),
 }
 
 
 def admin_config_screen(note: str | None = None) -> Screen:
-    lines = [f"<b>{label}:</b> {esc(str(cfg(k))[:60]) or '—'}" for k, (label, _) in CONFIG_FIELDS.items()]
+    lines = [f"<b>{label}:</b> " + (("ON ✅" if cfg(k) else "OFF") if ft == "bool" else (esc(str(cfg(k))[:60]) or "—"))
+             for k, (label, ft) in CONFIG_FIELDS.items()]
     text = title("SETTING", "Bot Settings") + "\n".join(lines)
     if note:
         text += f"\n\n{e('INFO')} {esc(note)}"
@@ -2521,7 +2631,7 @@ def admin_broadcast_progress(sent: int, failed: int, blocked: int, total: int, d
 # ======================================================================================
 Result = str | tuple[str, bool] | None
 Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE, list[str]], Awaitable[Result]]
-ROUTES: dict[str, tuple[Handler, bool]] = {}
+ROUTES: dict[str, tuple[Handler, bool, bool]] = {}
 KEEP_AWAIT = {"noop", "dep"}
 
 
@@ -2537,10 +2647,12 @@ def on_input(kind: str):
     return deco
 
 
-def route(*names: str, admin: bool = False):
+def route(*names: str, admin: bool = False, wait: bool = False):
+    """wait=True: the handler's popup answer matters (API balance, refill result…), so the spinner
+    stays until it's ready instead of being stopped early."""
     def deco(fn: Handler) -> Handler:
         for name in names:
-            ROUTES[name] = (fn, admin)
+            ROUTES[name] = (fn, admin, wait)
         return fn
     return deco
 
@@ -2569,7 +2681,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     for i in range(len(parts), 0, -1):
         entry = ROUTES.get(":".join(parts[:i]))
         if entry:
-            fn, admin_only, args = *entry, parts[i:]
+            fn, admin_only, must_wait, args = *entry, parts[i:]
             break
     else:
         await safe_answer(query)
@@ -2590,7 +2702,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if ":".join(parts[:1]) not in KEEP_AWAIT:
         context.user_data.pop(AWAIT, None)  # navigating away cancels any pending text input
     task = asyncio.ensure_future(fn(update, context, args))
-    done, _ = await asyncio.wait({task}, timeout=0.35)
+    done, _ = await asyncio.wait({task}, timeout=None if must_wait else 0.12)
     answered_early = not done
     if answered_early:
         await safe_answer(query)  # stop the spinner now; the screen update follows
@@ -2603,11 +2715,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     toast, alert = (result if isinstance(result, tuple) else (result, False))
     if not answered_early:
         await safe_answer(query, toast, alert)
-    elif toast and alert:
-        try:
-            await context.bot.send_message(update.effective_chat.id, esc(toast))
-        except TelegramError:
-            pass
+    elif toast:
+        log.debug("toast dropped after early answer: %s", toast)  # the screen itself shows the result
 
 
 def set_await(context: ContextTypes.DEFAULT_TYPE, kind: str, **data) -> None:
@@ -2800,9 +2909,10 @@ async def confirm_order(update, context) -> Result:
 async def place_order_flow(app: Application, order: dict, uid: int, chat_id: int, panel_id: int, seq: int) -> None:
     bot = app.bot
     spec = order_svc(order)
-    frames = [f"{e('SYSTEM')} <b>Placing order #{order['order_id']}</b>\n{bar}  {esc(spec['short'])} · {order['quantity']:,}"
-              for bar in ("▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰▰▱", "▰▰▰▰▰")]
-    async with Draft(bot, chat_id, frames, interval=0.9):
+    steps = ("Connecting", "Verifying link", "Placing order", "Confirming", "Almost done")
+    frames = [f"{pe('ROCKET')} <b>{label}…</b>\n{bar}  {esc(spec['short'])} · {order['quantity']:,}"
+              for label, bar in zip(steps, ("▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰▰▱", "▰▰▰▰▰"))]
+    async with Draft(bot, chat_id, frames, interval=0.6):
         placed, error = await auto_place(order)
     fresh = await store.get_order(order["order_id"]) or order
     screen = receipt_screen(fresh, error)
@@ -2815,10 +2925,12 @@ async def place_order_flow(app: Application, order: dict, uid: int, chat_id: int
         except TelegramError as exc:
             log.info("Could not deliver receipt to %s: %s", uid, exc)
     user = await store.get_user(uid)
-    note = (f"{e('CHECK')} Auto-placed on provider (<code>{esc(fresh.get('provider_order_id'))}</code>)." if placed else
+    note = (f"{e('CHECK')} Order placed successfully." if placed else
             f"{e('EDIT')} <b>Manual order</b> — approve it and send the panel Order ID." if fresh.get("manual") else
             f"{e('WARN')} Needs manual action: <i>{esc(error)}</i>")
     await notify_admins(bot, admin_order_text(fresh, user) + f"\n\n{note}", None if placed else admin_order_actions(fresh, back=False))
+    log_event("ORDER", "New order" + (" · placed on API" if placed else " · manual" if fresh.get("manual") else " · needs action"),
+              who(user, uid) + "\n" + f"<code>#{esc(order_no(fresh))}</code> · {esc(order_svc(fresh)['label'])} · <b>{fresh['quantity']:,}</b> · {fresh['coins']} coins" + ("" if placed or fresh.get("manual") else f"\n⚠️ {esc(error)}"))
 
 
 @route("orders")
@@ -2831,7 +2943,7 @@ async def cb_orders(update, context, args):
     await render(update, context, orders_screen(rows, total, page))
 
 
-@route("od")
+@route("od", wait=True)
 async def cb_order_detail(update, context, args):
     action = args[0] if args and args[0] in ("r", "rf", "cx") else ""
     oid = args[1] if action and len(args) > 1 else (args[0] if args else "")
@@ -2844,14 +2956,17 @@ async def cb_order_detail(update, context, args):
         if time.monotonic() - _refresh_cache.get(oid, -1e9) < 20:
             return "⏳ Just checked — try again in a few seconds."
         _refresh_cache[oid] = time.monotonic()
-        res = await sync_orders(context.bot, only=[order])
-        note = "Status refreshed from the provider." if not res["errors"] else "Provider is not responding right now."
+        async with busy(context.bot, update.effective_chat.id, "REFRESH", "Checking live status"):
+            res = await sync_orders(context.bot, only=[order])
+        note = "Status refreshed." if not res["errors"] else "Live status is not available right now — try again soon."
         toast = "🔄 Updated"
     elif action == "rf":
-        note = await request_refill(context.bot, order)
+        async with busy(context.bot, update.effective_chat.id, "RETRY", "Requesting refill"):
+            note = await request_refill(context.bot, order)
         toast = note
     elif action == "cx":
-        note = await request_cancel(context.bot, order)
+        async with busy(context.bot, update.effective_chat.id, "CANCEL", "Cancelling your order"):
+            note = await request_cancel(context.bot, order)
         toast = note
     order = await store.get_order(oid) or order
     await render(update, context, order_detail_screen(order, note))
@@ -2875,6 +2990,7 @@ async def request_refill(bot, order: dict) -> str:
             fresh = await store.get_order(oid) or order
             await notify_admins(bot, f"{e('RETRY')} <b>{fancy('Refill Request')}</b>\n\n" + admin_order_text(fresh, await store.get_user(order["user_id"])),
                                 admin_order_actions(fresh, back=False))
+            log_event("RETRY", "Refill requested (manual)", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins")
             return "♻️ Refill request sent to the team."
         cfg_ = _cfg_for_order(order)
         if not cfg_:
@@ -2884,6 +3000,7 @@ async def request_refill(bot, order: dict) -> str:
         except ProviderError as exc:
             return f"❌ Refill failed: {exc}"
         await store.update_order(oid, last_refill_at=utcnow(), refill_status="requested", refill_id=refill_id)
+    log_event("RETRY", "Refill requested (API)", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins")
     return "♻️ Refill requested successfully!"
 
 
@@ -2908,6 +3025,7 @@ async def request_cancel(bot, order: dict) -> str:
     except ProviderError as exc:
         return f"❌ Cancel failed: {exc}"
     await store.update_order(oid, cancel_requested=True, cancel_requested_at=utcnow())
+    log_event("CANCEL", "Cancel requested (API)", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins")
     return "✖️ Cancel requested — unused coins are refunded automatically once the panel confirms."
 
 
@@ -2956,7 +3074,8 @@ async def cb_referral(update, context, args):
 
 @route("bonus")
 async def cb_bonus(update, context, args):
-    claimed, user, next_at = await store.claim_daily(update.effective_user.id, C.daily_bonus, C.daily_cooldown_hours)
+    async with busy(context.bot, update.effective_chat.id, "BONUS", "Opening your daily bonus"):
+        claimed, user, next_at = await store.claim_daily(update.effective_user.id, C.daily_bonus, C.daily_cooldown_hours)
     await render(update, context, bonus_screen(claimed, user, next_at))
     return f"🎁 +{C.daily_bonus} coins!" if claimed else None
 
@@ -2989,10 +3108,11 @@ async def cb_admin_stats(update, context, args):
     await render(update, context, admin_stats_screen(await store.stats()))
 
 
-@route("a:sync", admin=True)
+@route("a:sync", admin=True, wait=True)
 async def cb_admin_sync(update, context, args):
-    res = await sync_orders(context.bot)
-    await store.expire_deposits()
+    async with busy(context.bot, update.effective_chat.id, "REFRESH", "Syncing all orders", min_time=0.3):
+        res = await sync_orders(context.bot)
+        await store.expire_deposits()
     await render(update, context, admin_screen(await store.stats(), await maintenance_on()))
     return (f"Checked {res['checked']} · ✅{res['completed']} · 🌗{res['partial']} · ↩️{res['refunded']}"
             + (f" · ⚠️{res['errors']} errors" if res["errors"] else "")), True
@@ -3034,7 +3154,7 @@ async def _finish_admin_message(update, context, text: str, markup: InlineKeyboa
             log.info("Could not update admin message: %s", exc)
 
 
-@route("a:oa", admin=True)
+@route("a:oa", admin=True, wait=True)
 async def cb_admin_order_action(update, context, args):
     if len(args) < 2:
         return None
@@ -3051,6 +3171,7 @@ async def cb_admin_order_action(update, context, args):
         await notify(bot, order["user_id"], f"{e('DONE')} <b>{fancy('Order Completed')}</b>\n\n<code>#{oid}</code> has been fulfilled. Thank you!",
                      _order_markup(oid))
         order, toast = updated, "✅ Marked complete"
+        log_event("DONE", "Order marked complete", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins" + f"\nby admin <code>{update.effective_user.id}</code>")
     elif action == "ref":
         updated = await refund_order(bot, order, "refunded", order["coins"], "admin_refund", ["pending", "processing"],
                                      completed_at=utcnow(), completed_by=update.effective_user.id)
@@ -3060,6 +3181,7 @@ async def cb_admin_order_action(update, context, args):
                                             f"<b>{order['coins']}</b> coins returned to your wallet.", _order_markup(oid))
         note = "If it was already placed on the provider, cancel it there too." if order["status"] == "processing" else None
         order, toast = updated, "↩️ Refunded"
+        log_event("REFUND", "Order refunded by admin", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins" + f"\nby admin <code>{update.effective_user.id}</code>")
     elif action == "retry":
         placed, error = await auto_place(order)
         order = await store.get_order(oid) or order
@@ -3105,6 +3227,8 @@ async def approve_manual(update, context, oid: str, external_id: str | None) -> 
                  + "\nDelivery is in progress.", _order_markup(oid))
     await render(update, context, Screen(admin_order_text(order, await store.get_user(order["user_id"]), "Approved ✅"),
                                          admin_order_actions(order)))
+    log_event("CHECK", "Manual order approved", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins" + (f"\nOrder ID: <code>{esc(external_id)}</code>" if external_id else "")
+              + f"\nby admin <code>{update.effective_user.id}</code>")
     return "✅ Approved"
 
 
@@ -3165,6 +3289,9 @@ async def cb_admin_deposit_action(update, context, args):
                                                   "Contact support if you believe this is a mistake.",
                      kb([btn("Support", url=C.support_url, icon="SUPPORT")]))
     stamp = f"\n\n{e('DONE')} <b>{'Approved' if approve else 'Rejected'}</b> by <code>{update.effective_user.id}</code>"
+    log_event("CHECK" if approve else "CROSS", f"Deposit {'approved' if approve else 'rejected'}",
+              f"<code>#{did}</code> · user <code>{dep['user_id']}</code> · {dep['coins']:,} coins · {C.currency}{dep['price']:,}"
+              f"\nby admin <code>{update.effective_user.id}</code>")
     base = deposit_admin_text(dep, await store.get_user(dep["user_id"]))
     back = kb([btn("Deposits", "a:deps", icon="BACK", style="danger")]) if _is_panel(update, context) else None
     await _finish_admin_message(update, context, base + stamp, back)
@@ -3216,7 +3343,7 @@ async def cb_admin_service_toggle(update, context, args):
     return "🟢 Turned on" if SERVICES[kind]["enabled"] else "🔴 Turned off"
 
 
-@route("a:sb", admin=True)
+@route("a:sb", admin=True, wait=True)
 async def cb_admin_service_balance(update, context, args):
     kind = args[0] if args else ""
     if kind not in SERVICES:
@@ -3270,6 +3397,8 @@ async def cb_admin_user_ban(update, context, args):
     await store.set_banned(uid, ban)
     _user_cache.pop(uid, None)
     await show_admin_user(update, context, uid, "User banned." if ban else "User unbanned.")
+    log_event("BAN" if ban else "CHECK", "User banned" if ban else "User unbanned",
+              f"<code>{uid}</code> by admin <code>{update.effective_user.id}</code>")
     return "🚫 Banned" if ban else "✅ Unbanned"
 
 
@@ -3411,7 +3540,7 @@ def apply_api_info(sp: dict, info: dict) -> None:
     sp["cancel"] = truthy(info.get("cancel"))
 
 
-@route("a:sr", admin=True)
+@route("a:sr", admin=True, wait=True)
 async def cb_admin_service_sync(update, context, args):
     kind = args[0] if args else ""
     if kind not in SERVICES:
@@ -3897,6 +4026,12 @@ async def in_admin_add(update, context, state, text):
 @route("a:cf", admin=True)
 async def cb_admin_config(update, context, args):
     key = args[0] if args else ""
+    if key in CONFIG_FIELDS and CONFIG_FIELDS[key][1] == "bool":  # on/off switches toggle in one tap
+        CONFIG[key] = not cfg(key)
+        await save_config()
+        clear_await(context)
+        await render(update, context, admin_config_screen(f"{CONFIG_FIELDS[key][0]}: {'ON' if CONFIG[key] else 'OFF'}"))
+        return "✅ ON" if CONFIG[key] else "OFF"
     if key in CONFIG_FIELDS:
         label, ftype = CONFIG_FIELDS[key]
         set_await(context, "cfg_field", key=key, admin=True)
@@ -3923,6 +4058,17 @@ async def in_config_field(update, context, state, text):
             error = "Send a valid whole number."
     elif ftype == "url" and not re.match(r"^(https?://|tg://)\S+$", value):
         error = "Send a full link (https://t.me/…)."
+    elif ftype == "chat":
+        if value == "-":
+            value = ""
+        elif not re.fullmatch(r"-100\d{6,}|@[A-Za-z][A-Za-z0-9_]{3,}", value):
+            error = "Send the channel ID (-100…) or @username. Send - to turn logs off."
+        else:
+            try:
+                await context.bot.send_message(value, f"{e('CHECK')} <b>Log channel connected</b>\nBot events will be posted here.",
+                                               disable_notification=True)
+            except TelegramError as exc:
+                error = f"Can't post there ({exc}). Add the bot as admin in that channel first."
     elif ftype == "opt":
         value = "" if value == "-" else value[:100]
     elif ftype == "text":
@@ -4107,13 +4253,15 @@ async def in_redeem(update, context, state, text):
     if not code:
         await render(update, context, redeem_screen("Please send a valid code."))
         return
-    ok, error, coins = await store.redeem(code, update.effective_user.id)
+    async with busy(context.bot, update.effective_chat.id, "REDEEM", "Checking your code"):
+        ok, error, coins = await store.redeem(code, update.effective_user.id)
     if not ok:
         await render(update, context, redeem_screen(error))
         return
     clear_await(context)
     user = await store.get_user(update.effective_user.id) or {}
     await render(update, context, redeem_ok_screen(coins, int(user.get("coins", 0))))
+    log_event("REDEEM", "Code redeemed", who(user) + f"\nCode <code>{esc(code)}</code> · +{coins} coins")
 
 
 @on_input("deposit_proof")
@@ -4141,7 +4289,8 @@ async def submit_deposit(update, context, state: dict, *, file_id: str | None = 
         await render(update, context, Screen(title("WARN", "Deposit Expired") + "This deposit is no longer active. Please create a new one.",
                                              kb([btn("Deposit Coins", "dep", icon="DEPOSIT", style="success")], home_btn())))
         return
-    dep = await store.transition_deposit(did, ["awaiting_proof"], "review", proof_file_id=file_id, utr=utr, submitted_at=utcnow())
+    async with busy(context.bot, update.effective_chat.id, "SEND", "Sending your proof to the team"):
+        dep = await store.transition_deposit(did, ["awaiting_proof"], "review", proof_file_id=file_id, utr=utr, submitted_at=utcnow())
     clear_await(context)
     if not dep:
         await go_home(update, context)
@@ -4149,6 +4298,8 @@ async def submit_deposit(update, context, state: dict, *, file_id: str | None = 
     await render(update, context, deposit_sent_screen(dep))
     user = await store.get_user(dep["user_id"])
     await notify_admins(context.bot, deposit_admin_text(dep, user), deposit_admin_actions(did), photo=file_id)
+    log_event("DEPOSIT", "Deposit proof submitted", who(user) + f"\n<code>#{did}</code> · {dep['coins']:,} coins · {C.currency}{dep['price']:,}"
+              + (f" · UTR <code>{esc(utr)}</code>" if utr else "") + (" · 🖼 screenshot" if file_id else ""))
 
 
 @on_input("svc_field")
@@ -4231,6 +4382,8 @@ async def in_user_coins(update, context, state, text):
     await notify(context.bot, uid, f"{e('MONEY')} <b>{fancy('Wallet Updated')}</b>\n\n"
                                    f"{'+' if mode == 'add' else '-'}{amount} coins by the operator.\nNew balance: <b>{fmt_num(user['coins'])}</b>")
     await show_admin_user(update, context, uid, f"{'Added' if mode == 'add' else 'Removed'} {amount} coins.")
+    log_event("MONEY", f"Coins {'added' if mode == 'add' else 'removed'} by admin",
+              who(user) + f"\n{'+' if mode == 'add' else '-'}{amount} coins · balance {fmt_num(user['coins'])}\nby admin <code>{update.effective_user.id}</code>")
 
 
 @on_input("code_wizard")
@@ -4287,11 +4440,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await notify(context.bot, int(raw), f"{e('REFERRAL')} <b>{fancy('Referral Confirmed')}</b>\n{HR}\n\n"
                                                 f"{e('GEM')} <b>+{C.referral_bonus} coins</b> — "
                                                 f"{esc(update.effective_user.first_name)} joined with your link!")
+    if is_new:
+        ref = user.get("referred_by") or (await store.get_user(uid) or {}).get("referred_by")
+        log_event("NEW_USER", "New user", who(user) + (f"\nReferred by <code>{ref}</code>" if ref else ""))
     missing = await missing_channels(context.bot, uid)
     if missing:
         await render(update, context, join_screen(missing), force_new=True)
         return
-    await go_home(update, context, force_new=True)
+    screen = home_screen(await store.get_user(uid) or user, is_admin(uid))
+    await stream_typing(context.bot, update.effective_chat.id, screen.text)
+    clear_await(context)
+    await render(update, context, screen, force_new=True)
 
 
 def _command_screen(builder: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[Screen | None]], admin: bool = False):
@@ -4343,6 +4502,8 @@ async def _scr_help(update, context):
 # ======================================================================================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("Unhandled error while processing an update", exc_info=context.error)
+    uid = update.effective_user.id if isinstance(update, Update) and update.effective_user else "—"
+    log_event("ERROR", "Bot error", f"<code>{esc(type(context.error).__name__)}: {esc(str(context.error)[:300])}</code>\nuser <code>{uid}</code>")
     if isinstance(update, Update) and update.effective_chat and update.effective_chat.type == "private" and not update.callback_query:
         try:
             await context.bot.send_message(update.effective_chat.id, f"{e('ERROR')} Something went wrong. Please try /start again.")
@@ -4359,20 +4520,50 @@ async def probe_rich(bot) -> None:
     chat = settings.owner_id or next(iter(sorted(all_admin_ids())), 0)
     if not chat:
         return
-    test, mid = "<h2>Rich check</h2><p>This message deletes itself.</p>", None
+    mid = None
+    plain = "<h2>Rich check</h2><p>This message deletes itself.</p>"
+    fancy_test = f"<h2>{e('SKULL')} Rich check</h2><p>{e('GEM')} This message deletes itself.</p>"
     try:
-        res = await bot.do_api_request("sendRichMessage", api_kwargs={
-            "chat_id": chat, "rich_message": {"html": test}, "disable_notification": True})
+        test = plain
+        if "tg-emoji" in fancy_test:
+            try:
+                res = await bot.do_api_request("sendRichMessage", api_kwargs={
+                    "chat_id": chat, "rich_message": {"html": fancy_test}, "disable_notification": True})
+                test, Rich.custom_emoji = fancy_test, True
+            except TelegramError as exc:
+                Rich.custom_emoji = False
+                log.info("Premium emoji not accepted inside rich messages (%s)", exc)
+                res = None
+        else:
+            res = None
+        if res is None:
+            res = await bot.do_api_request("sendRichMessage", api_kwargs={
+                "chat_id": chat, "rich_message": {"html": plain}, "disable_notification": True})
         mid = int(res["message_id"])
         await bot.edit_message_text("✓", chat_id=chat, message_id=mid)
         await bot.do_api_request("editMessageText", api_kwargs={"chat_id": chat, "message_id": mid, "rich_message": {"html": test}})
         Rich.enabled = Rich.edits = True
-        log.info("Rich Messages: supported ✅")
+        log.info("Rich Messages: supported ✅ · premium emoji inside rich: %s", "yes" if Rich.custom_emoji else "no")
     except (TelegramError, KeyError, TypeError, ValueError) as exc:
         log.info("Rich Messages not available (%s) — using classic HTML", exc)
     finally:
         if mid:
             await safe_delete(bot, chat, mid)
+
+
+async def probe_drafts(bot) -> None:
+    if not Draft.enabled:
+        return
+    chat = settings.owner_id or next(iter(sorted(all_admin_ids())), 0)
+    if not chat:
+        return
+    try:
+        await bot.do_api_request("sendMessageDraft", api_kwargs={"chat_id": chat, "draft_id": 7, "text": "…"})
+        await bot.do_api_request("sendMessageDraft", api_kwargs={"chat_id": chat, "draft_id": 7, "text": ""})
+        log.info("Message drafts: supported ✅")
+    except TelegramError as exc:
+        Draft.enabled = False
+        log.info("Message drafts not available (%s)", exc)
 
 
 async def post_init(app: Application) -> None:
@@ -4402,7 +4593,10 @@ async def post_init(app: Application) -> None:
     except TelegramError as exc:
         log.warning("Could not set bot commands: %s", exc)
     await probe_rich(app.bot)
+    await probe_drafts(app.bot)
+    BG["bot"] = app.bot
     app.bot_data["bg_task"] = asyncio.create_task(background_loop(app))
+    log_event("CHECK", "Bot started", f"@{app.bot.username} · rich: {'on' if Rich.enabled else 'off'} · services: {len(SERVICES)}")
     log.info("%s ready as @%s · storage=%s · rich=%s · drafts=%s", C.bot_name, app.bot.username,
              type(store).__name__, Rich.enabled, Draft.enabled)
 
@@ -4423,7 +4617,7 @@ def build_application() -> Application:
     )
     defaults = Defaults(parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True))
     app = (Application.builder().token(settings.bot_token).defaults(defaults).persistence(persistence).concurrent_updates(32)
-           .connect_timeout(20).read_timeout(30).write_timeout(30).pool_timeout(20)
+           .connection_pool_size(64).connect_timeout(20).read_timeout(30).write_timeout(30).pool_timeout(20)
            .post_init(post_init).post_shutdown(post_shutdown).build())
     private = filters.ChatType.PRIVATE
     app.add_handler(CommandHandler("start", cmd_start, filters=private))
