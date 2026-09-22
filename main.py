@@ -17,6 +17,7 @@ All secrets come from environment variables / .env — never hardcode them.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import inspect
 import logging
@@ -37,12 +38,18 @@ from uuid import uuid4
 import httpx
 from dotenv import load_dotenv
 from telegram import (
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     BotCommand,
     BotCommandScopeChat,
     BotCommandScopeDefault,
     CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaAnimation,
+    InputMediaPhoto,
+    InputMediaVideo,
     LinkPreviewOptions,
     Update,
 )
@@ -174,7 +181,10 @@ def config_defaults() -> dict[str, Any]:
             "coin_packages": [list(p) for p in settings.coin_packages],
             "referral_bonus": settings.referral_bonus, "daily_bonus": settings.daily_bonus,
             "daily_cooldown_hours": settings.daily_cooldown_hours, "deposit_expiry_minutes": settings.deposit_expiry_minutes,
-            "log_channel": (os.getenv("LOG_CHANNEL") or "").strip(), "draft_effects": settings.message_drafts}
+            "log_channel": (os.getenv("LOG_CHANNEL") or "").strip(), "draft_effects": settings.message_drafts,
+            "star_packages": [[100, 100], [500, 450], [1000, 850]],
+            "stars_contact": (os.getenv("STARS_CONTACT") or "https://t.me/verifiednalayak").strip(),
+            "verify_contact": True, "allowed_phone_prefix": ""}
 
 
 def cfg(key: str) -> Any:
@@ -187,6 +197,26 @@ class _Cfg:
 
 
 C = _Cfg()  # C.currency, C.support_url … always the live value
+
+
+CURRENCIES = ("coins", "gems")   # coins = free (bonus/referral/redeem) · gems = bought (UPI / Stars)
+
+
+def cur_key(cur: str | None) -> str:
+    return "gems" if cur == "gems" else "coins"
+
+
+def cur_icon(cur: str | None) -> str:
+    return e("GEM") if cur_key(cur) == "gems" else e("COINS")
+
+
+def cur_plain(cur: str | None) -> str:
+    return "💎" if cur_key(cur) == "gems" else "🪙"
+
+
+def money(amount: float | int, cur: str | None) -> str:
+    """'90 coins' / '90 gems'"""
+    return f"{fmt_num(amount)} {cur_key(cur)}"
 
 
 def is_owner(user_id: int) -> bool:
@@ -224,13 +254,15 @@ def new_id() -> str:
 # Example:  "HEART": "5250903242417415799",
 # ======================================================================================
 PREMIUM_EMOJI_IDS: dict[str, str] = {
+    "ROBOT": "6070964971867477673",       # 🤖 (from captcha file)
+    "PHONE": "5465169893580086142",       # 📱 (from captcha file)
     "INSTA": "5312476345849094587",       # 📸 Instagram
     "SKULL": "6082409105501195897",       # 💀
     "FIRE": "6084629985845317971",        # 🔥
     "LIGHTNING": "",   # ⚡
     "SHIELD": "5463057538469621074",      # 🛡️
     "CROWN": "",       # 👑
-    "GEM": "5465281390931113531",         # 💎
+    "GEM": "5447325223588223612",         # 💎
     "ROCKET": "6041761071155386269",      # 🚀
     "TARGET": "6109432142079466939",      # 🎯
     "LOCK": "5258476306152038031",        # 🔒
@@ -264,7 +296,7 @@ PREMIUM_EMOJI_IDS: dict[str, str] = {
     "SYSTEM": "5854722989240619332",      # 🌀
     "SERVICE": "5433825729060018456",     # 🧭
     "QUANTITY": "5226929552319594190",    # 🔢
-    "COINS": "5886568200350472339",       # 🪙
+    "COINS": "5305299610116316405",       # 🪙
     "ERROR": "5774077015388852135",       # ❌
     "INFO": "6195239687368481708",        # 💡
     "DONE": "6080263490163973583",        # ✔️
@@ -317,6 +349,7 @@ DEFAULTS = {
     "BONUS": "🎁", "LEADER": "🏆", "REDEEM": "🎟️", "LIST": "📋", "COPY": "📋", "REFRESH": "🔄",
     "HOME": "🏠", "NEXT": "▶️", "PLUS": "➕", "MINUS": "➖", "POWER": "🔌", "PROCESS": "⚙️",
     "PARTIAL": "🌗", "CHART": "📈", "SEND": "📨", "PHOTO": "🖼️", "RETRY": "🔁", "UPI": "📲", "INSTA": "📸",
+    "TELEGRAM": "✈️", "ROBOT": "🤖", "PHONE": "📱", "STARS": "⭐",
 }
 
 
@@ -448,11 +481,16 @@ def kb(*rows: list[InlineKeyboardButton] | None) -> InlineKeyboardMarkup:
 # ======================================================================================
 # Services (runtime-editable, persisted in DB settings "services")
 # ======================================================================================
-GROUP_DEFAULTS: dict[str, Any] = {"name": "New Service", "description": "", "emoji_key": "STAR", "style": "primary", "enabled": True}
+GROUP_DEFAULTS: dict[str, Any] = {"name": "New Service", "description": "", "emoji_key": "STAR", "style": "primary", "enabled": True,
+                                  "platform": "instagram"}
+PLATFORMS: dict[str, dict[str, str]] = {
+    "instagram": {"name": "Instagram", "emoji_key": "INSTA", "style": "danger", "link": "Instagram post or reel"},
+    "telegram": {"name": "Telegram", "emoji_key": "TELEGRAM", "style": "primary", "link": "Telegram channel, group or post"},
+}
 SUB_DEFAULTS: dict[str, Any] = {
     "group": "", "name": "Standard", "description": "", "mode": "manual", "rate_per_1k": 10,
     "min": 100, "max": 10_000, "step": 1, "api_url": "", "api_key": "", "service_id": "",
-    "type": "Default", "refill": False, "cancel": False, "enabled": True,
+    "type": "Default", "refill": False, "cancel": False, "enabled": True, "currency": "coins",
 }
 # fallback shape for orders whose service was deleted
 SERVICE_DEFAULTS: dict[str, Any] = {**SUB_DEFAULTS, "label": "Service", "short": "Service", "category": "Service",
@@ -463,7 +501,7 @@ BASE_GROUPS: dict[str, dict[str, Any]] = {
     "g_views": {"name": "Instagram Views", "description": "Views for reels & videos — pick your speed.", "emoji_key": "EYE", "style": "primary"},
 }
 BASE_SERVICES: dict[str, dict[str, Any]] = {
-    "likes": {**SUB_DEFAULTS, "group": "g_likes", "name": "Likes", "mode": "auto", "rate_per_1k": 90, "min": 100, "max": 2_000,
+    "likes": {**SUB_DEFAULTS, "group": "g_likes", "name": "Likes", "mode": "auto", "currency": "gems", "rate_per_1k": 90, "min": 100, "max": 2_000,
               "step": 100, "api_url": "https://electrosmm.com/api/v2"},
     "views_slow": {**SUB_DEFAULTS, "group": "g_views", "name": "Slow", "description": "Natural, gradual delivery.", "mode": "auto",
                    "rate_per_1k": 3, "step": 100, "api_url": "https://luvsmm.com/api/v2", "service_id": "1137"},
@@ -510,6 +548,7 @@ def refresh_derived() -> None:
         spec["label"] = g["name"] if siblings == 1 else f"{g['name']} · {spec['name']}"
         words = g["name"].lower().split()
         spec["unit"] = words[-1] if words else "units"
+        spec["platform"] = g.get("platform", "instagram")
 
 
 def service(kind: str) -> dict[str, Any]:
@@ -523,8 +562,13 @@ def subs_of(gid: str, enabled_only: bool = True) -> list[str]:
     return [k for k, s in SERVICES.items() if s["group"] == gid and (s.get("enabled", True) or not enabled_only)]
 
 
-def groups(enabled_only: bool = True) -> list[str]:
-    return [gid for gid, g in GROUPS.items() if (g.get("enabled", True) or not enabled_only) and subs_of(gid, enabled_only)]
+def groups(enabled_only: bool = True, platform: str | None = None) -> list[str]:
+    return [gid for gid, g in GROUPS.items() if (g.get("enabled", True) or not enabled_only) and subs_of(gid, enabled_only)
+            and (platform is None or g.get("platform", "instagram") == platform)]
+
+
+def platform_of(kind: str) -> str:
+    return GROUPS.get(SERVICES.get(kind, {}).get("group", ""), {}).get("platform", "instagram")
 
 
 def is_live(kind: str) -> bool:
@@ -600,6 +644,37 @@ def quick_quantities(kind: str) -> list[int]:
 
 IG_HOSTS = {"instagram.com", "instagr.am"}
 _URL_RE = re.compile(r"(https?://)?(www\.|m\.)?(instagram\.com|instagr\.am)/[^\s<>\"']+", re.IGNORECASE)
+
+
+_TG_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/(\+[\w-]{6,}|joinchat/[\w-]{6,}|c/\d+/\d+|"
+                    r"[A-Za-z][\w]{3,31}(?:/\d+)?)", re.IGNORECASE)
+
+
+def validate_telegram_url(value: str) -> tuple[bool, str]:
+    """Accepts t.me/channel, t.me/channel/123 (post), t.me/+invite, t.me/c/123/45 and @username."""
+    text = (value or "").strip()
+    m = _TG_RE.search(text)
+    if m:
+        return True, f"https://t.me/{m.group(1)}"
+    m = re.fullmatch(r"@([A-Za-z][\w]{3,31})", text)
+    if m:
+        return True, f"https://t.me/{m.group(1)}"
+    return False, text
+
+
+def validate_link(platform: str, value: str) -> tuple[bool, str]:
+    return validate_telegram_url(value) if platform == "telegram" else validate_instagram_url(value)
+
+
+def detect_link(value: str) -> tuple[str | None, str]:
+    ok, link = validate_instagram_url(value)
+    if ok:
+        return "instagram", link
+    if re.search(r"(t\.me|telegram\.(me|dog))/", value or "", re.I):
+        ok, link = validate_telegram_url(value)
+        if ok:
+            return "telegram", link
+    return None, value
 
 
 def validate_instagram_url(value: str) -> tuple[bool, str]:
@@ -692,7 +767,7 @@ class MongoStore:
             {"telegram_id": uid},
             {"$set": {"username": username, "username_lc": (username or "").lower() or None,
                       "full_name": full_name, "last_seen": now, "blocked": False},
-             "$setOnInsert": {"telegram_id": uid, "coins": 0, "referrals": 0, "ref_earned": 0, "banned": False,
+             "$setOnInsert": {"telegram_id": uid, "coins": 0, "gems": 0, "referrals": 0, "ref_earned": 0, "banned": False,
                               "orders_count": 0, "spent": 0, "created_at": now, "insert_marker": marker}},
             upsert=True, return_document=self._after,
         )
@@ -710,26 +785,38 @@ class MongoStore:
             return await self.get_user(int(query))
         return await self.users.find_one({"username_lc": query.lstrip("@").lower()})
 
-    async def change_coins(self, uid: int, delta: int, reason: str, ref: str | None = None) -> dict | None:
-        """Atomic balance change. Negative delta only succeeds if balance is sufficient."""
+    async def change_coins(self, uid: int, delta: int, reason: str, ref: str | None = None, currency: str = "coins") -> dict | None:
+        """Atomic balance change (coins or gems). Negative delta only succeeds if the balance is sufficient."""
+        field = cur_key(currency)
         flt: dict[str, Any] = {"telegram_id": uid}
         if delta < 0:
-            flt["coins"] = {"$gte": -delta}
-        user = await self.users.find_one_and_update(flt, {"$inc": {"coins": delta}}, return_document=self._after)
+            flt[field] = {"$gte": -delta}
+        user = await self.users.find_one_and_update(flt, {"$inc": {field: delta}}, return_document=self._after)
         self._remember(user)
         if user and delta:
-            await self.ledger.insert_one({"user_id": uid, "delta": delta, "balance": user["coins"],
+            await self.ledger.insert_one({"user_id": uid, "delta": delta, "balance": user.get(field, 0), "currency": field,
                                           "reason": reason, "ref": ref, "at": utcnow()})
         return user
 
-    async def remove_coins_clamped(self, uid: int, amount: int, reason: str) -> dict | None:
+    async def mark_verified(self, uid: int, phone_hash: str, country: str) -> tuple[bool, str]:
+        """(ok, reason). One phone number can verify only one account."""
+        other = await self.users.find_one({"phone_hash": phone_hash, "telegram_id": {"$ne": uid}}, {"telegram_id": 1})
+        if other:
+            return False, "used"
+        user = await self.users.find_one_and_update(
+            {"telegram_id": uid}, {"$set": {"verified": True, "phone_hash": phone_hash, "phone_country": country,
+                                            "verified_at": utcnow()}}, return_document=self._after)
+        self._remember(user)
+        return bool(user), ""
+
+    async def remove_coins_clamped(self, uid: int, amount: int, reason: str, currency: str = "coins") -> dict | None:
         user = await self.get_user(uid)
         if not user:
             return None
-        take = min(amount, max(0, int(user.get("coins", 0))))
+        take = min(amount, max(0, int(user.get(cur_key(currency), 0))))
         if take <= 0:
             return user
-        return await self.change_coins(uid, -take, reason) or await self.get_user(uid)
+        return await self.change_coins(uid, -take, reason, currency=currency) or await self.get_user(uid)
 
     async def ledger_for(self, uid: int, limit: int = 6) -> list[dict]:
         return await _to_list(self.ledger.find({"user_id": uid}).sort("at", -1), limit)
@@ -783,6 +870,30 @@ class MongoStore:
             await self.ledger.insert_one({"user_id": referrer_id, "delta": bonus, "balance": ref["coins"],
                                           "reason": "referral", "ref": str(new_uid), "at": utcnow()})
         return ref is not None
+
+    async def pay_referral(self, new_uid: int, bonus: int) -> int | None:
+        """Pay the referrer once the referred user is verified. Returns referrer id if paid."""
+        claimed = await self.users.find_one_and_update(
+            {"telegram_id": new_uid, "referred_by": {"$exists": True}, "ref_paid": {"$ne": True}}, {"$set": {"ref_paid": True}})
+        self._forget(new_uid)
+        if not claimed:
+            return None
+        ref_id = claimed["referred_by"]
+        ref = await self.users.find_one_and_update(
+            {"telegram_id": ref_id}, {"$inc": {"coins": bonus, "referrals": 1, "ref_earned": bonus}}, return_document=self._after)
+        self._remember(ref)
+        if ref and bonus:
+            await self.ledger.insert_one({"user_id": ref_id, "delta": bonus, "balance": ref["coins"], "currency": "coins",
+                                          "reason": "referral", "ref": str(new_uid), "at": utcnow()})
+        return ref_id if ref else None
+
+    async def set_referrer(self, new_uid: int, referrer_id: int) -> bool:
+        if new_uid == referrer_id or not await self.users.find_one({"telegram_id": referrer_id}, {"_id": 1}):
+            return False
+        res = await self.users.find_one_and_update({"telegram_id": new_uid, "referred_by": {"$exists": False}},
+                                                   {"$set": {"referred_by": referrer_id}})
+        self._forget(new_uid)
+        return bool(res)
 
     async def iter_user_ids(self):
         async for doc in self.users.find({"banned": {"$ne": True}}, {"telegram_id": 1}):
@@ -869,10 +980,11 @@ class MongoStore:
         return res.modified_count
 
     # ---- deposits --------------------------------------------------------------------
-    async def create_deposit(self, uid: int, coins: int, price: int, expiry_minutes: int) -> dict:
+    async def create_deposit(self, uid: int, coins: int, price: int, expiry_minutes: int, method: str = "upi") -> dict:
         now = utcnow()
         await self.deposits.update_many({"user_id": uid, "status": "awaiting_proof"}, {"$set": {"status": "cancelled"}})
-        dep = {"deposit_id": new_id(), "user_id": uid, "coins": coins, "price": price, "status": "awaiting_proof",
+        dep = {"deposit_id": new_id(), "user_id": uid, "coins": coins, "currency": "gems", "method": method,
+               "price": price, "status": "awaiting_proof",
                "expires_at": now + timedelta(minutes=expiry_minutes), "created_at": now}
         await self.deposits.insert_one(dict(dep))
         return dep
@@ -907,7 +1019,7 @@ class MongoStore:
             {"$match": {"status": {"$in": ["processing", "completed", "partial"]}}},
             {"$group": {"_id": None, "t": {"$sum": {"$subtract": ["$coins", {"$ifNull": ["$refunded", 0]}]}}}}]), 1)
         revenue = await _to_list(self.deposits.aggregate([
-            {"$match": {"status": "approved"}}, {"$group": {"_id": None, "t": {"$sum": "$price"}}}]), 1)
+            {"$match": {"status": "approved", "method": {"$ne": "stars"}}}, {"$group": {"_id": None, "t": {"$sum": "$price"}}}]), 1)
         return {
             "users": await self.users.count_documents({}),
             "users_today": await self.users.count_documents({"created_at": {"$gte": today}}),
@@ -948,7 +1060,7 @@ class MemoryStore:
     async def ensure_user(self, uid, username, full_name):
         now = utcnow()
         is_new = uid not in self.users
-        user = self.users.setdefault(uid, {"telegram_id": uid, "coins": 0, "referrals": 0, "ref_earned": 0,
+        user = self.users.setdefault(uid, {"telegram_id": uid, "coins": 0, "gems": 0, "referrals": 0, "ref_earned": 0,
                                            "banned": False, "orders_count": 0, "spent": 0, "created_at": now})
         user.update({"username": username, "username_lc": (username or "").lower() or None,
                      "full_name": full_name, "last_seen": now, "blocked": False})
@@ -965,20 +1077,31 @@ class MemoryStore:
         name = query.lstrip("@").lower()
         return next((dict(u) for u in self.users.values() if u.get("username_lc") == name), None)
 
-    async def change_coins(self, uid, delta, reason, ref=None):
+    async def change_coins(self, uid, delta, reason, ref=None, currency="coins"):
+        field = cur_key(currency)
         user = self.users.get(uid)
-        if not user or (delta < 0 and user["coins"] < -delta):
+        if not user or (delta < 0 and user.get(field, 0) < -delta):
             return None
-        user["coins"] += delta
-        self._log(uid, delta, user["coins"], reason, ref)
+        user[field] = user.get(field, 0) + delta
+        self._log(uid, delta, user[field], reason, ref)
+        if delta:
+            self.ledger[-1]["currency"] = field
         return dict(user)
 
-    async def remove_coins_clamped(self, uid, amount, reason):
+    async def mark_verified(self, uid, phone_hash, country):
+        if any(u.get("phone_hash") == phone_hash and k != uid for k, u in self.users.items()):
+            return False, "used"
+        if uid not in self.users:
+            return False, ""
+        self.users[uid].update(verified=True, phone_hash=phone_hash, phone_country=country, verified_at=utcnow())
+        return True, ""
+
+    async def remove_coins_clamped(self, uid, amount, reason, currency="coins"):
         user = self.users.get(uid)
         if not user:
             return None
-        take = min(amount, max(0, user["coins"]))
-        return await self.change_coins(uid, -take, reason) if take else dict(user)
+        take = min(amount, max(0, user.get(cur_key(currency), 0)))
+        return await self.change_coins(uid, -take, reason, currency=currency) if take else dict(user)
 
     async def ledger_for(self, uid, limit=6):
         return sorted((x for x in self.ledger if x["user_id"] == uid), key=lambda x: x["at"], reverse=True)[:limit]
@@ -1024,6 +1147,27 @@ class MemoryStore:
         ref["referrals"] += 1
         ref["ref_earned"] += bonus
         self._log(referrer_id, bonus, ref["coins"], "referral", str(new_uid))
+        return True
+
+    async def pay_referral(self, new_uid, bonus):
+        new = self.users.get(new_uid)
+        if not new or "referred_by" not in new or new.get("ref_paid"):
+            return None
+        new["ref_paid"] = True
+        ref = self.users.get(new["referred_by"])
+        if not ref:
+            return None
+        ref["coins"] += bonus
+        ref["referrals"] += 1
+        ref["ref_earned"] += bonus
+        self._log(ref["telegram_id"], bonus, ref["coins"], "referral", str(new_uid))
+        return ref["telegram_id"]
+
+    async def set_referrer(self, new_uid, referrer_id):
+        new, ref = self.users.get(new_uid), self.users.get(referrer_id)
+        if new_uid == referrer_id or not new or not ref or "referred_by" in new:
+            return False
+        new["referred_by"] = referrer_id
         return True
 
     async def iter_user_ids(self):
@@ -1112,12 +1256,13 @@ class MemoryStore:
                 order["status"], count = "pending", count + 1
         return count
 
-    async def create_deposit(self, uid, coins, price, expiry_minutes):
+    async def create_deposit(self, uid, coins, price, expiry_minutes, method="upi"):
         for dep in self.deposits.values():
             if dep["user_id"] == uid and dep["status"] == "awaiting_proof":
                 dep["status"] = "cancelled"
         now = utcnow()
-        dep = {"deposit_id": new_id(), "user_id": uid, "coins": coins, "price": price, "status": "awaiting_proof",
+        dep = {"deposit_id": new_id(), "user_id": uid, "coins": coins, "currency": "gems", "method": method,
+               "price": price, "status": "awaiting_proof",
                "expires_at": now + timedelta(minutes=expiry_minutes), "created_at": now}
         self.deposits[dep["deposit_id"]] = dep
         return dict(dep)
@@ -1163,7 +1308,7 @@ class MemoryStore:
             "completed": sum(1 for o in orders if o["status"] in ("completed", "partial")),
             "orders_today": sum(1 for o in orders if o["created_at"] >= today),
             "coins_spent": sum(o["coins"] - o.get("refunded", 0) for o in orders if o["status"] in ("processing", "completed", "partial")),
-            "revenue": sum(d["price"] for d in self.deposits.values() if d["status"] == "approved"),
+            "revenue": sum(d["price"] for d in self.deposits.values() if d["status"] == "approved" and d.get("method") != "stars"),
             "deposits_review": sum(1 for d in self.deposits.values() if d["status"] == "review"),
         }
 
@@ -1179,6 +1324,8 @@ async def load_runtime() -> None:
     if saved_groups:
         for gid, g in saved_groups.items():
             GROUPS[gid] = {**GROUP_DEFAULTS, **{k: v for k, v in g.items() if k in GROUP_DEFAULTS}}
+            if GROUPS[gid].get("platform") not in PLATFORMS:
+                GROUPS[gid]["platform"] = "instagram"
         for kind, raw in saved.items():
             SERVICES[kind] = {**SUB_DEFAULTS, **{k: v for k, v in raw.items() if k in SUB_DEFAULTS}}
     else:  # first run, or migrating from the older flat layouts
@@ -1246,6 +1393,11 @@ class Screen:
     text: str
     markup: InlineKeyboardMarkup | None = None
     rich: str | None = None   # optional rich-HTML version
+    media: dict | None = None  # {"type": photo|video|animation, "file_id"} -> sent as media with the text as caption
+
+
+MEDIA_SEND = {"photo": "send_photo", "video": "send_video", "animation": "send_animation"}
+PANEL_MEDIA = "panel_is_media"
 
 
 def _not_modified(exc: Exception) -> bool:
@@ -1290,6 +1442,14 @@ def rich_card(key: str, heading: str, rows: list[tuple[str, str]] | None = None,
 
 
 async def ui_send(bot, chat_id: int, screen: Screen) -> int:
+    if screen.media:
+        try:
+            send = getattr(bot, MEDIA_SEND[screen.media["type"]])
+            msg = await send(chat_id, screen.media["file_id"], caption=screen.text, parse_mode=ParseMode.HTML,
+                             reply_markup=screen.markup)
+            return msg.message_id
+        except (TelegramError, KeyError) as exc:
+            log.warning("Slide could not be sent (%s) — showing text instead", exc)
     if screen.rich and Rich.enabled:
         payload: dict[str, Any] = {"chat_id": chat_id, "rich_message": {"html": screen.rich}}
         if screen.markup:
@@ -1305,6 +1465,16 @@ async def ui_send(bot, chat_id: int, screen: Screen) -> int:
 
 
 async def ui_edit(bot, chat_id: int, message_id: int, screen: Screen) -> bool:
+    if screen.media:
+        try:
+            cls = {"photo": InputMediaPhoto, "video": InputMediaVideo, "animation": InputMediaAnimation}[screen.media["type"]]
+            await bot.edit_message_media(media=cls(screen.media["file_id"], caption=screen.text, parse_mode=ParseMode.HTML),
+                                         chat_id=chat_id, message_id=message_id, reply_markup=screen.markup)
+            return True
+        except BadRequest as exc:
+            return _not_modified(exc)
+        except (TelegramError, KeyError):
+            return False
     if screen.rich and Rich.enabled and Rich.edits:
         payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "rich_message": {"html": screen.rich}}
         if screen.markup:
@@ -1350,12 +1520,19 @@ async def render(update: Update, context: ContextTypes.DEFAULT_TYPE, screen: Scr
     ud[SEQ] = ud.get(SEQ, 0) + 1
     query = update.callback_query
     target = None if force_new else (query.message.message_id if query and query.message else ud.get(PANEL))
+    if query and query.message:
+        m = query.message
+        target_is_media = bool(getattr(m, "photo", None) or getattr(m, "video", None) or getattr(m, "animation", None))
+    else:
+        target_is_media = bool(ud.get(PANEL_MEDIA))
+    if target and target_is_media != bool(screen.media):
+        target = None  # Telegram can't turn a media message into a text one (or back): replace it cleanly
     if target and await ui_edit(bot, chat_id, target, screen):
-        ud[PANEL] = target
+        ud[PANEL], ud[PANEL_MEDIA] = target, bool(screen.media)
         return target
     new_id_ = await ui_send(bot, chat_id, screen)
     old = ud.get(PANEL)
-    ud[PANEL] = new_id_
+    ud[PANEL], ud[PANEL_MEDIA] = new_id_, bool(screen.media)
     if old and old != new_id_:
         await safe_delete(bot, chat_id, old)
     return new_id_
@@ -1686,7 +1863,7 @@ async def refund_order(bot, order: dict, to_status: str, amount: int, reason: st
     if not updated:
         return None
     if amount:
-        await store.change_coins(order["user_id"], amount, reason, order["order_id"])
+        await store.change_coins(order["user_id"], amount, reason, order["order_id"], currency=order.get("currency", "coins"))
     return updated
 
 
@@ -1706,7 +1883,7 @@ async def apply_provider_status(bot, order: dict, info: dict) -> str | None:
         if await store.transition_order(oid, ["processing"], "completed", remains=0, start_count=start, completed_at=utcnow()):
             await notify(bot, uid, f"{e('DONE')} <b>{fancy('Order Completed')}</b>\n\n<code>#{oid}</code> · {esc(label)} · "
                                    f"<b>{qty:,}</b> delivered. Thank you!", _order_markup(oid))
-            log_event("DONE", "Order completed", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins")
+            log_event("DONE", "Order completed", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {money(order['coins'], order.get('currency'))}")
             return "completed"
     elif status == "partial":
         remains = max(0, min(qty, remains or 0))
@@ -1714,16 +1891,16 @@ async def apply_provider_status(bot, order: dict, info: dict) -> str | None:
         if await refund_order(bot, order, "partial", refund, "partial_refund", ["processing"],
                               remains=remains, start_count=start, completed_at=utcnow()):
             await notify(bot, uid, f"{e('PARTIAL')} <b>{fancy('Order Partially Completed')}</b>\n\n<code>#{oid}</code> · "
-                                   f"{qty - remains:,}/{qty:,} delivered.\n{e('REFUND')} <b>{refund}</b> coins refunded.",
+                                   f"{qty - remains:,}/{qty:,} delivered.\n{e('REFUND')} <b>{money(refund, order.get('currency'))}</b> refunded.",
                          _order_markup(oid))
-            log_event("PARTIAL", "Order partial", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins" + f"\nRefunded {refund} coins")
+            log_event("PARTIAL", "Order partial", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {money(order['coins'], order.get('currency'))}" + f"\nRefunded {refund} coins")
             return "partial"
     elif status in ("canceled", "cancelled", "refunded", "fail", "failed", "error"):
         if await refund_order(bot, order, "refunded", int(order["coins"]), "order_refund", ["processing"],
                               provider_status=status, completed_at=utcnow()):
             await notify(bot, uid, f"{e('REFUND')} <b>{fancy('Order Cancelled')}</b>\n\n<code>#{oid}</code> was cancelled by the "
-                                   f"provider. <b>{order['coins']}</b> coins returned to your wallet.", _order_markup(oid))
-            log_event("REFUND", "Order cancelled by provider", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins")
+                                   f"provider. <b>{money(order['coins'], order.get('currency'))}</b> returned to your wallet.", _order_markup(oid))
+            log_event("REFUND", "Order cancelled by provider", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {money(order['coins'], order.get('currency'))}")
             return "refunded"
     elif status and (status != order.get("provider_status") or remains != order.get("remains")):
         await store.update_order(oid, provider_status=status, remains=remains, start_count=start)
@@ -1802,7 +1979,7 @@ def cancel_btn(cb: str = "cancel") -> list[InlineKeyboardButton]:
 
 def svc_label(kind: str) -> str:
     spec = service(kind)
-    return f"{spec['short']} · {fmt_num(spec['rate_per_1k'])}/K" + ("" if spec.get("enabled", True) else " · OFF")
+    return f"{spec['short']} · {fmt_num(spec['rate_per_1k'])}{cur_plain(spec.get('currency'))}/K" + ("" if spec.get("enabled", True) else " · OFF")
 
 
 def mode_badge(spec: dict) -> str:
@@ -1830,55 +2007,72 @@ def bonus_status(user: dict) -> str:
     return "ready" if left.total_seconds() <= 0 else f"in {fmt_left(left)}"
 
 
+def zigzag(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
+    """2 buttons, then 1 full-width button, then 2, then 1 … repeating."""
+    rows, i, take = [], 0, 2
+    while i < len(buttons):
+        rows.append(buttons[i:i + take])
+        i += take
+        take = 1 if take == 2 else 2
+    return rows
+
+
 def home_screen(user: dict, admin: bool) -> Screen:
-    gids = groups()
     name = esc((user.get("full_name") or "Friend")[:24])
-    coins, orders, bonus = fmt_num(user.get("coins", 0)), user.get("orders_count", 0), bonus_status(user)
-    svc_lines = []
-    rich_items = []
-    for gid in gids[:8]:
-        g = GROUPS[gid]
-        low = min(float(SERVICES[k]["rate_per_1k"]) for k in subs_of(gid))
-        svc_lines.append(f"{e(g['emoji_key'])} <b>{esc(g['name'])}</b> — from <code>{fmt_num(low)}</code>/K")
-        rich_items.append(f"<li>{re_(g['emoji_key'])} <b>{esc(g['name'])}</b> — from {fmt_num(low)} coins / 1K</li>")
+    coins, gems = fmt_num(user.get("coins", 0)), fmt_num(user.get("gems", 0))
+    orders, bonus = user.get("orders_count", 0), bonus_status(user)
+    plats = [p for p in PLATFORMS if groups(platform=p)]
+    svc_lines, rich_items = [], []
+    for p in plats:
+        names = " · ".join(GROUPS[g]["name"].replace(PLATFORMS[p]["name"], "").strip() or GROUPS[g]["name"] for g in groups(platform=p)[:5])
+        svc_lines.append(f"{e(PLATFORMS[p]['emoji_key'])} <b>{PLATFORMS[p]['name']}</b> — {esc(names)}")
+        rich_items.append(f"<li>{re_(PLATFORMS[p]['emoji_key'])} <b>{PLATFORMS[p]['name']}</b> — {esc(names)}</li>")
     text = (
         f"{e('SKULL')} <b>{fancy(C.bot_name)}</b> {e('SKULL')}\n"
-        f"{e('INSTA')} <i>{fancy('Premium Instagram Growth Panel')}</i>\n\n"
+        f"{e('INSTA')} <i>{fancy('Premium Social Growth Panel')}</i>\n\n"
         f"<blockquote>{e('PROFILE')} <b>{name}</b>\n"
-        f"{e('GEM')} {fancy('Balance')}: <b>{coins}</b> coins\n"
+        f"{e('COINS')} {fancy('Coins')}: <b>{coins}</b>  ·  {e('GEM')} {fancy('Gems')}: <b>{gems}</b>\n"
         f"{e('ORDER')} {fancy('Orders')}: <b>{orders}</b>  ·  {e('BONUS')} {fancy('Bonus')}: <b>{bonus}</b></blockquote>\n\n"
         + (f"{e('SERVICE')} <b>{fancy('Services')}</b>\n<blockquote>" + "\n".join(svc_lines) + "</blockquote>\n\n" if svc_lines else "")
-        + f"{e('INFO')} <i>Paste any Instagram link here to order instantly.</i>\n"
+        + f"{e('INFO')} <i>Paste any Instagram or Telegram link to order instantly.</i>\n"
         f"{e('DOWN')} <b>{fancy('Choose An Option')}</b>"
     )
-    rich = (f"<h2>{re_('SKULL')} {esc(C.bot_name)}</h2><p><i>{re_('INSTA')} Premium Instagram Growth Panel</i></p>"
+    rich = (f"<h2>{re_('SKULL')} {esc(C.bot_name)}</h2><p><i>{re_('INSTA')} Premium Social Growth Panel</i></p>"
             f"<table><tr><td><b>{re_('PROFILE')} Account</b></td><td>{name}</td></tr>"
-            f"<tr><td><b>{re_('GEM')} Balance</b></td><td>{coins} coins</td></tr>"
+            f"<tr><td><b>{re_('COINS')} Coins</b></td><td>{coins}</td></tr>"
+            f"<tr><td><b>{re_('GEM')} Gems</b></td><td>{gems}</td></tr>"
             f"<tr><td><b>{re_('ORDER')} Orders</b></td><td>{orders}</td></tr>"
             f"<tr><td><b>{re_('BONUS')} Daily bonus</b></td><td>{bonus}</td></tr></table>"
             + (f"<p><b>{re_('SERVICE')} Services</b></p><ul>{''.join(rich_items)}</ul>" if rich_items else "")
-            + f"<p><i>{re_('INFO')} Paste any Instagram link here to order instantly.</i></p>")
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for gid in gids[:12]:
-        g, kinds = GROUPS[gid], subs_of(gid)
-        single = len(kinds) == 1
-        label = re.sub(r"^(instagram|insta|ig)\s+", "", g["name"], flags=re.I) or g["name"]
-        row.append(btn(label[:18], f"svc:{kinds[0]}" if single else f"grp:{gid}", icon=g["emoji_key"], style=g["style"]))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows += [
-        [btn("Wallet", "wallet", icon="WALLET", style="success"), btn("Orders", "orders:0", icon="ORDER", style="primary"),
-         btn("Profile", "profile", icon="PROFILE", style="danger")],
-        [btn("Bonus", "bonus", icon="BONUS", style="danger"), btn("Refer", "ref", icon="REFER", style="success"),
-         btn("Top", "lb", icon="LEADER", style="primary")],
-        [btn("Redeem", "redeem", icon="REDEEM", style="primary"), btn("Support", "support", icon="SUPPORT", style="danger")]
-        + ([btn("Admin", "a", icon="ADMIN", style="success")] if admin else []),
+            + f"<p><i>{re_('INFO')} Paste any Instagram or Telegram link to order instantly.</i></p>")
+    buttons = [btn(PLATFORMS[p]["name"], f"plat:{p}", icon=PLATFORMS[p]["emoji_key"], style=PLATFORMS[p]["style"]) for p in plats]
+    buttons += [
+        btn("Wallet", "wallet", icon="WALLET", style="success"),
+        btn("My Orders", "orders:0", icon="ORDER", style="primary"), btn("Profile", "profile", icon="PROFILE", style="danger"),
+        btn("Redeem Code", "redeem", icon="REDEEM", style="primary"),
+        btn("Support", "support", icon="SUPPORT", style="danger"),
     ]
-    return Screen(text, kb(*rows), rich)
+    if admin:
+        buttons.append(btn("Admin Panel", "a", icon="ADMIN", style="success"))
+    return Screen(text, kb(*zigzag(buttons)), rich)
+
+
+def platform_screen(platform: str) -> Screen:
+    info = PLATFORMS.get(platform)
+    gids = groups(platform=platform) if info else []
+    if not gids:
+        return Screen(title("WARN", "Unavailable") + "No services here right now.", kb(home_btn()))
+    lines, buttons = [], []
+    for gid in gids:
+        g, kinds = GROUPS[gid], subs_of(gid)
+        low = min(float(SERVICES[k]["rate_per_1k"]) for k in kinds)
+        curs = {SERVICES[k].get("currency", "coins") for k in kinds}
+        price = f"from {fmt_num(low)}" + (cur_icon(next(iter(curs))) if len(curs) == 1 else "") + "/K"
+        lines.append(f"{e(g['emoji_key'])} <b>{esc(g['name'])}</b> — {price}" + (f"\n   <i>{esc(g['description'])}</i>" if g.get("description") else ""))
+        buttons.append(btn(g["name"][:22], f"svc:{kinds[0]}" if len(kinds) == 1 else f"grp:{gid}", icon=g["emoji_key"], style=g["style"]))
+    text = (title(info["emoji_key"], f"{info['name']} Services") + "\n\n".join(lines)
+            + f"\n\n{e('INFO')} {e('COINS')} = free coins · {e('GEM')} = gems")
+    return Screen(text, kb(*zigzag(buttons), [btn("Back", "home", icon="BACK", style="danger")]))
 
 
 def group_screen(gid: str) -> Screen:
@@ -1889,21 +2083,22 @@ def group_screen(gid: str) -> Screen:
     blocks = []
     for k in kinds:
         sp = SERVICES[k]
-        line = (f"{e(g['emoji_key'])} <b>{esc(sp['name'])}</b> — <b>{fmt_num(sp['rate_per_1k'])} coins / 1K</b>\n"
+        line = (f"{e(g['emoji_key'])} <b>{esc(sp['name'])}</b> — <b>{money(sp['rate_per_1k'], sp.get('currency'))} / 1K</b> {cur_icon(sp.get('currency'))}\n"
                 f"   {e('TARGET')} {sp['min']:,} – {sp['max']:,}" + (f" · {extras(sp)}" if extras(sp) else ""))
         if sp.get("description"):
             line += f"\n   <i>{esc(sp['description'])}</i>"
         blocks.append(line)
     text = (title(g["emoji_key"], g["name"]) + (f"<i>{esc(g['description'])}</i>\n\n" if g.get("description") else "")
             + f"{e('DOWN')} Choose a type:\n\n" + "\n\n".join(blocks))
-    rows = [[btn(f"{SERVICES[k]['name']} · {fmt_num(SERVICES[k]['rate_per_1k'])}/K", f"svc:{k}", icon=g["emoji_key"], style=g["style"])]
-            for k in kinds]
-    return Screen(text, kb(*rows, [btn("Back", "home", icon="BACK", style="danger")]))
+    rows = [[btn(svc_label(k), f"svc:{k}", icon=g["emoji_key"], style=g["style"])] for k in kinds]
+    return Screen(text, kb(*rows, [btn("Back", f"plat:{g.get('platform', 'instagram')}", icon="BACK", style="danger")]))
 
 
-def pick_service_screen(link: str) -> Screen:
-    text = title("INSTA", "Link Detected") + f"<code>{esc(link)}</code>\n\n{e('DOWN')} Which service do you want for this post?"
-    rows = [[btn(svc_label(k), f"svc:{k}", icon=s["emoji_key"], style=s["style"])] for k, s in SERVICES.items() if is_live(k)]
+def pick_service_screen(link: str, platform: str = "instagram") -> Screen:
+    text = (title(PLATFORMS[platform]["emoji_key"], "Link Detected") + f"<code>{esc(link)}</code>\n\n"
+            f"{e('DOWN')} Which {PLATFORMS[platform]['name']} service do you want?")
+    rows = [[btn(s["label"][:30] + f" · {fmt_num(s['rate_per_1k'])}{cur_plain(s.get('currency'))}/K", f"svc:{k}", icon=s["emoji_key"], style=s["style"])]
+            for k, s in SERVICES.items() if is_live(k) and platform_of(k) == platform]
     return Screen(text, kb(*rows[:14], cancel_btn()))
 
 
@@ -1918,10 +2113,14 @@ def _svc_header(spec: dict) -> str:
 
 def link_prompt(kind: str, error: str | None = None) -> Screen:
     spec = service(kind)
-    text = (_svc_header(spec) +
-            f"{e('INSTA')} <b>Step 1/2</b> — send the <b>public</b> Instagram post or reel link.\n\n"
-            f"{e('TARGET')} Example:\n<code>https://www.instagram.com/reel/ABC123xyz/</code>\n\n"
-            f"{e('SHIELD')} Accepted: /p/, /reel/, /tv/ links. Private accounts can't receive {spec['unit']}.")
+    text = (_svc_header(spec)
+            + (f"{e('TELEGRAM')} <b>Step 1/2</b> — send the <b>public</b> Telegram channel, group or post link.\n\n"
+               f"{e('TARGET')} Examples:\n<code>https://t.me/yourchannel</code>\n<code>https://t.me/yourchannel/25</code>\n\n"
+               f"{e('SHIELD')} Channel/group must be public (or send its invite link)."
+               if spec.get("platform") == "telegram" else
+               f"{e('INSTA')} <b>Step 1/2</b> — send the <b>public</b> Instagram post or reel link.\n\n"
+               f"{e('TARGET')} Example:\n<code>https://www.instagram.com/reel/ABC123xyz/</code>\n\n"
+               f"{e('SHIELD')} Accepted: /p/, /reel/, /tv/ links. Private accounts can't receive {spec['unit']}."))
     if error:
         text += f"\n\n{e('ERROR')} <b>{esc(error)}</b>"
     return Screen(text, kb(cancel_btn()))
@@ -1932,7 +2131,7 @@ def comments_prompt(kind: str, link: str, error: str | None = None) -> Screen:
     text = (_svc_header(spec) + f"{e('LINK')} <code>{esc(link)}</code>\n\n"
             f"{e('SUPPORT')} <b>Step 2/2</b> — send your comments, <b>one per line</b>.\n"
             f"Each line = 1 comment · allowed <b>{spec['min']:,} – {spec['max']:,}</b> comments\n"
-            f"{e('COINS')} Rate: <b>{fmt_num(spec['rate_per_1k'])} coins / 1K</b>")
+            f"{cur_icon(spec.get('currency'))} Rate: <b>{money(spec['rate_per_1k'], spec.get('currency'))} / 1K</b>")
     if error:
         text += f"\n\n{e('ERROR')} <b>{esc(error)}</b>"
     return Screen(text, kb([btn("Change Link", "ord:link", icon="EDIT")], cancel_btn()))
@@ -1944,10 +2143,10 @@ def qty_screen(kind: str, link: str, error: str | None = None) -> Screen:
             f"{e('LINK')} <code>{esc(link)}</code>\n\n"
             f"{e('QUANTITY')} <b>Step 2/2</b> — pick a quantity or type one (e.g. <code>1500</code> or <code>2k</code>).\n"
             f"Allowed: <b>{spec['min']:,} – {spec['max']:,}</b>" + (f" · step <b>{spec['step']:,}</b>" if spec["step"] > 1 else "") +
-            f"\n{e('COINS')} Rate: <b>{fmt_num(spec['rate_per_1k'])} coins / 1K</b>")
+            f"\n{cur_icon(spec.get('currency'))} Rate: <b>{money(spec['rate_per_1k'], spec.get('currency'))} / 1K</b>")
     if error:
         text += f"\n\n{e('ERROR')} <b>{esc(error)}</b>"
-    picks = [btn(f"{fmt_short(q)} · {price_for(kind, q)}🪙", f"qty:{q}") for q in quick_quantities(kind)]
+    picks = [btn(f"{fmt_short(q)} · {price_for(kind, q)}{cur_plain(spec.get('currency'))}", f"qty:{q}") for q in quick_quantities(kind)]
     rows = [picks[i:i + 2] for i in range(0, len(picks), 2)]
     return Screen(text, kb(*rows, [btn("Change Link", "ord:link", icon="EDIT")], cancel_btn()))
 
@@ -1955,27 +2154,30 @@ def qty_screen(kind: str, link: str, error: str | None = None) -> Screen:
 def review_screen(draft: dict, balance: int, note: str | None = None) -> Screen:
     kind, qty, coins = draft["kind"], draft["quantity"], draft["coins"]
     spec = service(kind)
+    cur = spec.get("currency", "coins")
     enough = balance >= coins
     what = f"{qty:,} comments" if draft.get("comments") else f"{qty:,} {spec['unit']}"
     text = (title("REPORT", "Review Your Order") +
             f"{e('SERVICE')} Service: {e(spec['emoji_key'])} <b>{esc(spec['label'])}</b>\n"
             f"{e('LINK')} Link: <code>{esc(draft['link'])}</code>\n"
             f"{e('QUANTITY')} Quantity: <b>{what}</b>\n"
-            f"{e('COINS')} Cost: <b>{coins} coins</b>\n"
-            f"{e('WALLET')} Balance: <b>{fmt_num(balance)} coins</b>\n"
+            f"{cur_icon(cur)} Cost: <b>{money(coins, cur)}</b>\n"
+            f"{e('WALLET')} Balance: <b>{money(balance, cur)}</b>\n"
             + (f"{e('RETRY')} Refill: <b>available</b>\n" if spec.get("refill") else "") + "\n")
     if spec.get("mode") != "auto":
         text += f"{e('INFO')} This is a manual service — an admin will approve it and share an Order ID.\n"
     text += (f"{e('WARN')} Confirm only if the link is <b>public</b> and correct."
-             if enough else f"{e('ERROR')} <b>Insufficient balance</b> — you need <b>{coins - balance}</b> more coins.")
+             if enough else f"{e('ERROR')} <b>Insufficient {cur_key(cur)}</b> — you need <b>{money(coins - balance, cur)}</b> more."
+             + ("" if enough or cur_key(cur) == "coins" else f"\n{e('GEM')} Gems can be bought from <b>Wallet → Buy Gems</b>."))
     if note:
         text += f"\n\n{e('INFO')} {esc(note)}"
-    rows_rich = [("Service", esc(spec["label"])), ("Quantity", what), ("Cost", f"{coins} coins"),
-                 ("Balance", f"{fmt_num(balance)} coins")]
+    rows_rich = [("Service", esc(spec["label"])), ("Quantity", what), ("Cost", money(coins, cur)),
+                 ("Balance", money(balance, cur))]
     rich = rich_card("REPORT", "Review Your Order", rows_rich, [f"<code>{esc(draft['link'])}</code>"],
-                     "Confirm only if the link is public and correct." if enough else f"Insufficient balance — need {coins - balance} more coins.")
-    first = ([btn(f"Confirm & Pay {coins}", "ord:ok", icon="CHECK", style="success")] if enough
-             else [btn("Deposit Coins", "dep", icon="DEPOSIT", style="success")])
+                     "Confirm only if the link is public and correct." if enough else f"Insufficient {cur_key(cur)} — need {money(coins - balance, cur)} more.")
+    first = ([btn(f"Confirm & Pay {coins} {cur_plain(cur)}", "ord:ok", icon="CHECK", style="success")] if enough
+             else [btn("Buy Gems" if cur_key(cur) == "gems" else "Earn Coins", "dep" if cur_key(cur) == "gems" else "profile",
+                       icon="GEM" if cur_key(cur) == "gems" else "BONUS", style="success")])
     change = btn("Comments", "ord:com", icon="EDIT") if draft.get("comments") else btn("Quantity", "ord:qty", icon="EDIT")
     return Screen(text, kb(first, [change, btn("Link", "ord:link", icon="LINK")], cancel_btn()), rich)
 
@@ -1998,10 +2200,10 @@ def receipt_screen(order: dict, error: str | None = None) -> Screen:
             f"{e('ID')} Order ID: <code>#{order['order_id']}</code>\n"
             f"{e('SERVICE')} Service: {esc(spec['label'])}\n"
             f"{e('QUANTITY')} Quantity: <b>{order['quantity']:,}</b>\n"
-            f"{e('COINS')} Paid: <b>{order['coins']} coins</b>\n\n{status_line}")
+            f"{cur_icon(order.get('currency'))} Paid: <b>{money(order['coins'], order.get('currency'))}</b>\n\n{status_line}")
     rich = rich_card("CHECK", "Order Received",
                      [("Order ID", f"<code>#{order['order_id']}</code>"), ("Service", esc(spec["label"])),
-                      ("Quantity", f"{order['quantity']:,}"), ("Paid", f"{order['coins']} coins"),
+                      ("Quantity", f"{order['quantity']:,}"), ("Paid", money(order["coins"], order.get("currency"))),
                       ("Status", "Live — delivering" if placed else "Queued for processing")])
     markup = kb([btn("Track Order", f"od:{order['order_id']}", icon="ORDER", style="primary"),
                  btn("Copy ID", copy=order["order_id"], icon="COPY")],
@@ -2037,7 +2239,7 @@ def orders_screen(rows: list[dict], total: int, page: int) -> Screen:
 def _order_rows(o: dict) -> list[tuple[str, str]]:
     spec = order_svc(o)
     rows = [("Order ID", f"<code>#{o['order_id']}</code>"), ("Service", esc(spec["label"])), ("Quantity", f"{o['quantity']:,}"),
-            ("Paid", f"{o['coins']} coins"), ("Status", esc(o["status"].title()))]
+            ("Paid", money(o["coins"], o.get("currency"))), ("Status", esc(o["status"].title()))]
     if o.get("start_count") is not None:
         rows.append(("Start count", f"{o['start_count']:,}"))
     if o.get("remains") is not None and o["status"] in ("processing", "partial"):
@@ -2047,7 +2249,7 @@ def _order_rows(o: dict) -> list[tuple[str, str]]:
     if o.get("comments"):
         rows.append(("Comments", f"{len(o['comments'].splitlines())} lines"))
     if o.get("refunded"):
-        rows.append(("Refunded", f"{o['refunded']} coins"))
+        rows.append(("Refunded", money(o["refunded"], o.get("currency"))))
     if o.get("can_refill"):
         rows.append(("Refill", "requested" if o.get("refill_status") == "requested" else "available"))
     rows.append(("Created", fmt_dt(o.get("created_at"))))
@@ -2078,57 +2280,87 @@ def order_detail_screen(o: dict, note: str | None = None) -> Screen:
 
 def profile_screen(user: dict) -> Screen:
     rows = [("Name", esc(user.get("full_name", "User"))), ("User ID", f"<code>{user['telegram_id']}</code>"),
-            ("Balance", f"{fmt_num(user.get('coins', 0))} coins"), ("Orders", str(user.get("orders_count", 0))),
-            ("Coins spent", fmt_num(user.get("spent", 0))), ("Referrals", str(user.get("referrals", 0))),
+            ("Coins", fmt_num(user.get("coins", 0))), ("Gems", fmt_num(user.get("gems", 0))),
+            ("Orders", str(user.get("orders_count", 0))), ("Referrals", str(user.get("referrals", 0))),
+            ("Daily bonus", bonus_status(user)), ("Verified", "Yes ✅" if user.get("verified") else "No"),
             ("Joined", fmt_dt(user.get("created_at")))]
     text = title("PROFILE", "Your Profile") + "\n".join(f"<b>{k}:</b> {v}" for k, v in rows)
-    return Screen(text, kb([btn("Copy My ID", copy=str(user["telegram_id"]), icon="COPY")], home_btn()),
-                  rich_card("PROFILE", "Your Profile", rows))
+    return Screen(text, kb(*zigzag([
+        btn("Daily Bonus", "bonus", icon="BONUS", style="success"), btn("Refer & Earn", "ref", icon="REFER", style="primary"),
+        btn("Leaderboard", "lb", icon="LEADER", style="danger"),
+        btn("Copy My ID", copy=str(user["telegram_id"]), icon="COPY", style="primary"), btn("Main Menu", "home", icon="HOME", style="danger"),
+    ])), rich_card("PROFILE", "Your Profile", rows))
 
 
 def wallet_screen(user: dict, ledger: list[dict]) -> Screen:
     hist = []
     for row in ledger:
         sign = "+" if row["delta"] > 0 else ""
-        hist.append(f"{'🟢' if row['delta'] > 0 else '🔴'} <code>{sign}{row['delta']}</code> · {esc(REASONS.get(row['reason'], row['reason']))}"
-                    f" · <i>{aware(row['at']).strftime('%d %b')}</i>")
-    text = (title("WALLET", "Your Wallet") + f"{e('CREDIT')} <b>Available:</b> <code>{fmt_num(user.get('coins', 0))} coins</code>\n\n"
+        hist.append(f"{'🟢' if row['delta'] > 0 else '🔴'} <code>{sign}{row['delta']}</code>{cur_plain(row.get('currency'))} · "
+                    f"{esc(REASONS.get(row['reason'], row['reason']))} · <i>{aware(row['at']).strftime('%d %b')}</i>")
+    text = (title("WALLET", "Your Wallet") +
+            f"<blockquote>{e('COINS')} <b>Coins:</b> <code>{fmt_num(user.get('coins', 0))}</code>  <i>(free — bonus, referrals, codes)</i>\n"
+            f"{e('GEM')} <b>Gems:</b> <code>{fmt_num(user.get('gems', 0))}</code>  <i>(bought — for premium services)</i></blockquote>\n\n"
             + (f"<b>{fancy('Recent Activity')}</b>\n" + "\n".join(hist) if hist else f"{e('INFO')} No transactions yet.")
-            + f"\n\n{e('SHIELD')} Coins are deducted only when you confirm an order.")
-    rich_rows = [(f"{'+' if r['delta'] > 0 else ''}{r['delta']}", f"{esc(REASONS.get(r['reason'], r['reason']))} · {aware(r['at']).strftime('%d %b')}")
-                 for r in ledger]
-    rich = rich_card("WALLET", "Your Wallet", rich_rows or None, [f"<b>Available:</b> {fmt_num(user.get('coins', 0))} coins"])
-    return Screen(text, kb([btn("Deposit Coins", "dep", icon="DEPOSIT", style="success")],
-                           [btn("Redeem Code", "redeem", icon="REDEEM"), btn("Daily Bonus", "bonus", icon="BONUS")],
-                           home_btn()), rich)
+            + f"\n\n{e('SHIELD')} Balance is deducted only when you confirm an order.")
+    rich_rows = [(f"{'+' if r['delta'] > 0 else ''}{r['delta']} {cur_plain(r.get('currency'))}",
+                  f"{esc(REASONS.get(r['reason'], r['reason']))} · {aware(r['at']).strftime('%d %b')}") for r in ledger]
+    rich = rich_card("WALLET", "Your Wallet", rich_rows or None,
+                     [f"<b>{re_('COINS')} Coins:</b> {fmt_num(user.get('coins', 0))} · <b>{re_('GEM')} Gems:</b> {fmt_num(user.get('gems', 0))}"])
+    return Screen(text, kb(*zigzag([
+        btn("Buy Gems", "dep", icon="GEM", style="success"),
+        btn("Redeem Code", "redeem", icon="REDEEM", style="primary"), btn("Daily Bonus", "bonus", icon="BONUS", style="danger"),
+        btn("Main Menu", "home", icon="HOME", style="danger"),
+    ])), rich)
 
 
 def deposit_menu_screen() -> Screen:
-    text = title("DEPOSIT", "Deposit Coins") + f"{esc(C.deposit_info)}\n\n{e('DOWN')} Pick a package:"
-    rows = [[btn(f"{coins:,} coins · {C.currency}{price:,}", f"dep:p:{i}", icon="COINS")]
-            for i, (coins, price) in enumerate(C.coin_packages)]
-    return Screen(text, kb(*rows, [btn("Back", "wallet", icon="BACK", style="danger")]))
+    text = (title("GEM", "Buy Gems") + f"{e('GEM')} Gems unlock premium services (Instagram likes, Telegram members…).\n\n"
+            f"{e('DOWN')} Choose how you want to pay:")
+    return Screen(text, kb([btn("UPI / Bank", "dep:u", icon="UPI", style="success"), btn("Telegram Stars", "dep:s", icon="STARS", style="primary")],
+                           [btn("Back", "wallet", icon="BACK", style="danger")]))
+
+
+def deposit_packages_screen(method: str) -> Screen:
+    stars = method == "stars"
+    pk = cfg("star_packages") if stars else cfg("coin_packages")
+    unit = "⭐" if stars else C.currency
+    text = (title("STARS" if stars else "UPI", "Pay With Telegram Stars" if stars else "Pay With UPI")
+            + (f"{e('STARS')} You'll send Stars to our team; gems are added after approval.\n\n" if stars else f"{esc(C.deposit_info)}\n\n")
+            + f"{e('DOWN')} Pick a package:")
+    rows = [[btn(f"{g:,} gems · {p:,} ⭐" if stars else f"{g:,} gems · {unit}{p:,}", f"dep:{'sp' if stars else 'p'}:{i}", icon="GEM")]
+            for i, (g, p) in enumerate(pk)]
+    return Screen(text, kb(*rows, [btn("Back", "dep", icon="BACK", style="danger")]))
 
 
 def deposit_pay_screen(dep: dict, error: str | None = None) -> Screen:
     left = fmt_left(aware(dep["expires_at"]) - utcnow())
-    text = (title("DEPOSIT", f"Deposit #{dep['deposit_id']}") +
-            f"{e('COINS')} Package: <b>{dep['coins']:,} coins</b>\n{e('MONEY')} Pay: <b>{C.currency}{dep['price']:,}</b>\n"
-            + (f"{e('UPI')} UPI: <code>{esc(C.upi_id)}</code>\n" if C.upi_id else "")
-            + f"\n{esc(C.deposit_info)}\n\n"
-            f"{e('PHOTO')} After paying, send the <b>payment screenshot</b> here (put the UTR in the caption), "
-            f"or just send the <b>UTR / transaction ID</b>.\n{e('TIME')} Expires in <b>{left}</b>.")
+    stars = dep.get("method") == "stars"
+    head = title("STARS" if stars else "DEPOSIT", f"Order #{dep['deposit_id']}") + f"{e('GEM')} Package: <b>{dep['coins']:,} gems</b>\n"
+    if stars:
+        contact = C.stars_contact
+        handle = "@" + contact.rstrip("/").split("/")[-1] if "t.me/" in contact else contact
+        text = (head + f"{e('STARS')} Pay: <b>{dep['price']:,} Telegram Stars</b>\n\n"
+                f"1️⃣ Open <b>{esc(handle)}</b> and send <b>{dep['price']:,} ⭐</b> (gift Stars / Star gift).\n"
+                f"2️⃣ Send the <b>screenshot</b> here, or tap <b>I've Sent the Stars</b>.\n\n"
+                f"{e('TIME')} Expires in <b>{left}</b>. Gems are added once an admin approves.")
+        rows = [[btn(f"Send Stars to {handle}", url=contact, icon="STARS", style="primary")],
+                [btn("I've Sent the Stars", "dep:sent", icon="CHECK", style="success")]]
+    else:
+        text = (head + f"{e('MONEY')} Pay: <b>{C.currency}{dep['price']:,}</b>\n"
+                + (f"{e('UPI')} UPI: <code>{esc(C.upi_id)}</code>\n" if C.upi_id else "")
+                + f"\n{esc(C.deposit_info)}\n\n"
+                f"{e('PHOTO')} After paying, send the <b>payment screenshot</b> here (put the UTR in the caption), "
+                f"or just send the <b>UTR / transaction ID</b>.\n{e('TIME')} Expires in <b>{left}</b>.")
+        rows = [[btn("Copy UPI ID", copy=C.upi_id, icon="COPY"), btn("Copy Amount", copy=str(dep["price"]), icon="COPY")]] if C.upi_id else []
     if error:
         text += f"\n\n{e('ERROR')} <b>{esc(error)}</b>"
-    rows = []
-    if C.upi_id:
-        rows.append([btn("Copy UPI ID", copy=C.upi_id, icon="COPY"), btn("Copy Amount", copy=str(dep["price"]), icon="COPY")])
-    return Screen(text, kb(*rows, [btn("Cancel Deposit", "dep:x", icon="CANCEL", style="danger")]))
+    return Screen(text, kb(*rows, [btn("Cancel", "dep:x", icon="CANCEL", style="danger")]))
 
 
 def deposit_sent_screen(dep: dict) -> Screen:
-    text = (title("CHECK", "Proof Received") + f"Deposit <code>#{dep['deposit_id']}</code> · <b>{dep['coins']:,} coins</b>\n\n"
-            f"{e('LOADING')} The operator is reviewing it. You'll get a message the moment it's approved.")
+    text = (title("CHECK", "Request Received") + f"Order <code>#{dep['deposit_id']}</code> · <b>{dep['coins']:,} gems</b>\n\n"
+            f"{e('LOADING')} An admin is verifying your payment. You'll get a message the moment gems are added.")
     return Screen(text, kb([btn("Wallet", "wallet", icon="WALLET")], home_btn()))
 
 
@@ -2188,6 +2420,16 @@ def join_screen(missing: list[dict] | None = None) -> Screen:
     return Screen(text, kb(*rows, [btn("I've Joined", "join", icon="CHECK", style="success")]))
 
 
+def verify_text(error: str | None = None) -> str:
+    text = (f"<blockquote>{e('ROBOT')} <b>{fancy('Verify Your Account')}</b>\n\n"
+            f"{e('SHIELD')} To keep the bot safe from fake accounts, tap the button below and share "
+            f"<b>your own Telegram contact</b>.\n\n"
+            f"{e('PHONE')} Your number is only used for verification and is never shown to anyone.</blockquote>")
+    if error:
+        text += f"\n\n{e('ERROR')} <b>{esc(error)}</b>"
+    return text
+
+
 def banned_screen() -> Screen:
     return Screen(title("BAN", "Access Restricted") + "You are banned from using this bot. Contact support if this is a mistake.",
                   kb([btn("Support", url=C.support_url, icon="SUPPORT")]))
@@ -2218,7 +2460,7 @@ def admin_screen(st: dict, maintenance: bool) -> Screen:
         [btn(f"Deposits ({st['deposits_review']})", "a:deps", icon="DEPOSIT", style="success")],
         [btn("Services", "a:sv", icon="SERVICE", style="primary"), btn("Channels", "a:ch", icon="JOIN")],
         [btn("Admins", "a:ad", icon="ADMIN")],
-        [btn("Bot Settings", "a:cf", icon="SETTING"), btn("Coin Packages", "a:pk", icon="COINS")],
+        [btn("Bot Settings", "a:cf", icon="SETTING"), btn("Gem Packages", "a:pk", icon="GEM")],
         [btn("Find User", "a:find", icon="SEARCH"), btn("Redeem Codes", "a:rc", icon="REDEEM")],
         [btn("Broadcast", "a:bc", icon="BROADCAST"),
          btn(f"Maintenance: {'ON' if maintenance else 'OFF'}", "a:mt", icon="MAINTENANCE", style="danger" if maintenance else None)],
@@ -2277,7 +2519,7 @@ def admin_order_text(o: dict, user: dict | None, note: str | None = None) -> str
     text = (f"{e(ORDER_STATUS_ICON.get(o['status'], 'ORDER'))} <b>{fancy('Order')} #{esc(order_no(o))}</b>\n{HR}\n\n" +
             f"<b>User:</b> {esc((user or {}).get('full_name', 'User'))} · <code>{o['user_id']}</code>\n"
             f"<b>Service:</b> {esc(spec['label'])} · {mode_badge(spec)}\n" +
-            f"<b>Quantity:</b> {o['quantity']:,} · <b>Coins:</b> {o['coins']}\n"
+            f"<b>Quantity:</b> {o['quantity']:,} · <b>Price:</b> {money(o['coins'], o.get('currency'))}\n"
             f"<b>Status:</b> {esc(o['status'].title())}"
             + (f"\n<b>Comments:</b> {len(o['comments'].splitlines())} lines" if o.get("comments") else "")
             + (f"\n{e('RETRY')} <b>Refill requested</b>" if o.get("refill_status") == "requested" else "")
@@ -2293,17 +2535,21 @@ def admin_deposits_screen(rows: list[dict]) -> Screen:
     head = title("DEPOSIT", "Deposits")
     if not rows:
         return Screen(head + f"{e('DONE')} Nothing to review.", kb([btn("Back", "a", icon="BACK", style="danger")]))
-    lines = [f"<code>#{d['deposit_id']}</code> · <code>{d['user_id']}</code> · {d['coins']:,} coins · {C.currency}{d['price']:,}"
+    lines = [f"<code>#{d['deposit_id']}</code> · <code>{d['user_id']}</code> · {d['coins']:,} {cur_key(d.get('currency'))} · {deposit_price(d)}"
              f" · <i>{d['status'].replace('_', ' ')}</i>" for d in rows]
-    buttons = [[btn(f"#{d['deposit_id']} · {C.currency}{d['price']:,}", f"a:d:{d['deposit_id']}", icon="DEPOSIT")] for d in rows[:12]]
+    buttons = [[btn(f"#{d['deposit_id']} · {deposit_price(d)}", f"a:d:{d['deposit_id']}", icon="DEPOSIT")] for d in rows[:12]]
     return Screen(head + "\n".join(lines), kb(*buttons, [btn("Refresh", "a:deps", icon="REFRESH"), btn("Back", "a", icon="BACK", style="danger")]))
+
+
+def deposit_price(d: dict) -> str:
+    return f"{d['price']:,} ⭐ Stars" if d.get("method") == "stars" else f"{C.currency}{d['price']:,}"
 
 
 def deposit_admin_text(d: dict, user: dict | None) -> str:
     return (title("DEPOSIT", f"Deposit #{d['deposit_id']}") +
             f"<b>User:</b> {esc((user or {}).get('full_name', 'User'))} · <code>{d['user_id']}</code>"
             + (f" · @{esc(user['username'])}" if user and user.get("username") else "") +
-            f"\n<b>Package:</b> {d['coins']:,} coins for {C.currency}{d['price']:,}\n"
+            f"\n<b>Package:</b> {d['coins']:,} {cur_key(d.get('currency'))} for {deposit_price(d)}\n"
             f"<b>UTR:</b> <code>{esc(d.get('utr') or '—')}</code>\n<b>Status:</b> {esc(d['status'].replace('_', ' ').title())}")
 
 
@@ -2333,23 +2579,37 @@ def prompt_screen(key: str, heading: str, body: str, error: str | None = None, c
     return Screen(text, kb(*(rows or []), cancel_btn(cancel)))
 
 
-def admin_services_screen(note: str | None = None) -> Screen:
+def admin_services_screen(note: str | None = None, platform: str | None = None) -> Screen:
+    if platform not in PLATFORMS:  # sector chooser
+        lines = []
+        for p, info in PLATFORMS.items():
+            gids = [g for g, x in GROUPS.items() if x.get("platform", "instagram") == p]
+            subs = sum(len(subs_of(g, enabled_only=False)) for g in gids)
+            lines.append(f"{e(info['emoji_key'])} <b>{info['name']}</b> — {len(gids)} service(s) · {subs} sub-service(s)")
+        text = title("SERVICE", "Services") + "\n".join(lines) + f"\n\n{e('DOWN')} Choose a sector to manage:"
+        if note:
+            text += f"\n\n{e('INFO')} {esc(note)}"
+        return Screen(text, kb([btn(info["name"], f"a:sv:{p}", icon=info["emoji_key"], style=info["style"]) for p, info in PLATFORMS.items()],
+                               [btn("Back", "a", icon="BACK", style="danger")]))
+    info = PLATFORMS[platform]
+    gids = [g for g, x in GROUPS.items() if x.get("platform", "instagram") == platform]
     lines = []
-    for gid, g in GROUPS.items():
+    for gid in gids:
+        g = GROUPS[gid]
         subs = subs_of(gid, enabled_only=False)
         lines.append(f"{e(g['emoji_key'])} <b>{esc(g['name'])}</b> {'🟢' if g.get('enabled', True) else '🔴'}")
         for k in subs:
             sp = SERVICES[k]
-            lines.append(f"   • {esc(sp['name'])} · {fmt_num(sp['rate_per_1k'])}/K · {mode_badge(sp)}"
+            lines.append(f"   • {esc(sp['name'])} · {fmt_num(sp['rate_per_1k'])}{cur_plain(sp.get('currency'))}/K · {mode_badge(sp)}"
                          + ("" if sp.get("enabled", True) else " · 🔴 off"))
         if not subs:
             lines.append("   <i>no sub-services yet</i>")
-    text = title("SERVICE", "Services") + ("\n".join(lines) or "No services yet — add your first one.")
+    text = title(info["emoji_key"], f"{info['name']} Services") + ("\n".join(lines) or "No services yet — add your first one.")
     if note:
         text += f"\n\n{e('INFO')} {esc(note)}"
-    rows = [[btn(g["name"], f"a:g:{gid}", icon=g["emoji_key"], style=g["style"])] for gid, g in GROUPS.items()]
-    return Screen(text, kb([btn("Add Service", "a:gadd", icon="PLUS", style="success")], *rows[:20],
-                           [btn("Back", "a", icon="BACK", style="danger")]))
+    rows = [[btn(GROUPS[g]["name"], f"a:g:{g}", icon=GROUPS[g]["emoji_key"], style=GROUPS[g]["style"])] for g in gids]
+    return Screen(text, kb([btn(f"Add {info['name']} Service", f"a:gadd:{platform}", icon="PLUS", style="success")], *rows[:20],
+                           [btn("Sectors", "a:sv", icon="BACK", style="danger")]))
 
 
 def admin_group_screen(gid: str, note: str | None = None) -> Screen:
@@ -2367,10 +2627,13 @@ def admin_group_screen(gid: str, note: str | None = None) -> Screen:
     return Screen(text, kb(*rows, [btn("Add Sub-service", f"a:subadd:{gid}", icon="PLUS", style="success")],
                            [btn("Name", f"a:gf:name:{gid}", icon="EDIT"), btn("Description", f"a:gf:desc:{gid}", icon="EDIT")],
                            [btn("Button Emoji", f"a:ge:{gid}", icon=g["emoji_key"]), btn("Button Colour", f"a:gc:{gid}", icon="STAR")],
+                           [btn(f"Move to {PLATFORMS['telegram' if g.get('platform') != 'telegram' else 'instagram']['name']}",
+                                f"a:gp:{gid}", icon="SHARE")],
                            [btn("Hide" if g.get("enabled", True) else "Show", f"a:gx:{gid}", icon="POWER",
                                 style="danger" if g.get("enabled", True) else "success"),
                             btn("Delete Service", f"a:gdel:{gid}", icon="CROSS", style="danger")],
-                           [btn("Services", "a:sv", icon="BACK", style="danger")]))
+                           [btn(f"{PLATFORMS[g.get('platform', 'instagram')]['name']} Services", f"a:sv:{g.get('platform', 'instagram')}",
+                                icon="BACK", style="danger")]))
 
 
 def admin_sub_screen(kind: str, note: str | None = None) -> Screen:
@@ -2379,8 +2642,10 @@ def admin_sub_screen(kind: str, note: str | None = None) -> Screen:
     auto = sp.get("mode") == "auto"
     text = (title(g["emoji_key"], f"{g['name']} › {sp['name']}") +
             f"<b>Type:</b> {mode_badge(sp)} · {'🟢 On' if sp.get('enabled', True) else '🔴 Off'}\n"
+            f"<b>Paid with:</b> {cur_icon(sp.get('currency'))} {cur_key(sp.get('currency')).title()}"
+            f" · <b>Platform:</b> {PLATFORMS[g.get('platform', 'instagram')]['name']}\n"
             f"<b>Description:</b> {esc(sp.get('description') or '—')}\n"
-            f"<b>Price:</b> {fmt_num(sp['rate_per_1k'])} coins / 1K\n"
+            f"<b>Price:</b> {money(sp['rate_per_1k'], sp.get('currency'))} / 1K\n"
             f"<b>Quantity:</b> {sp['min']:,} – {sp['max']:,}" + (f" · step {sp['step']:,}" if sp["step"] > 1 else "") + "\n"
             f"<b>Refill:</b> {'ON' if sp.get('refill') else 'OFF'}" + (f" · <b>Cancel:</b> {'ON' if sp.get('cancel') else 'OFF'}" if auto else ""))
     if auto:
@@ -2400,7 +2665,9 @@ def admin_sub_screen(kind: str, note: str | None = None) -> Screen:
                  [btn("Service ID", f"a:sf:sid:{kind}", icon="ID"), btn("Sync from API", f"a:sr:{kind}", icon="REFRESH", style="primary")],
                  [btn("API Balance", f"a:sb:{kind}", icon="MONEY"), btn("Find Service IDs", f"a:ps:{kind}", icon="SEARCH")]]
     rows += [
-        [btn("Switch to Manual" if auto else "Switch to Automatic", f"a:sm:{kind}", icon="SYSTEM", style="primary")],
+        [btn("Switch to Manual" if auto else "Switch to Automatic", f"a:sm:{kind}", icon="SYSTEM", style="primary"),
+         btn("Pay with Coins" if cur_key(sp.get("currency")) == "gems" else "Pay with Gems", f"a:scur:{kind}",
+             icon="COINS" if cur_key(sp.get("currency")) == "gems" else "GEM", style="success")],
         [btn(f"Refill: {'ON' if sp.get('refill') else 'OFF'}", f"a:srf:{kind}", icon="RETRY")]
         + ([btn(f"Cancel: {'ON' if sp.get('cancel') else 'OFF'}", f"a:scx:{kind}", icon="CANCEL")] if auto else []),
         [btn("Turn Off" if sp.get("enabled", True) else "Turn On", f"a:sx:{kind}", icon="POWER",
@@ -2412,13 +2679,14 @@ def admin_sub_screen(kind: str, note: str | None = None) -> Screen:
 
 
 SUB_WIZ = {
+    "cur": "What will users pay with?\n\n🪙 <b>Coins</b> — free coins from bonus & referrals.\n💎 <b>Gems</b> — bought with UPI / Stars (premium services).",
     "type": "Choose the type:\n\n⚡ <b>Automatic</b> — orders go straight to your SMM panel API.\n✋ <b>Manual</b> — orders come to admins to approve.",
     "name": "Send the <b>sub-service name</b> (e.g. <code>Slow</code>, <code>Fast</code>, <code>HQ</code>).",
     "desc": "Send a short <b>description</b> users will see, or tap Skip.",
     "url": "Send the SMM panel <b>API base URL</b>\n(e.g. <code>https://luvsmm.com/api/v2</code>).",
     "key": "Send the <b>API key</b>. Your message is deleted immediately.",
     "sid": "Send the provider's <b>service ID</b> (e.g. <code>1137</code>).",
-    "rate": "Your selling <b>price in coins per 1,000</b> (e.g. <code>90</code>).",
+    "rate": "Your selling <b>price per 1,000</b> (e.g. <code>90</code>).",
     "min": "Send the <b>minimum quantity</b>.",
     "max": "Send the <b>maximum quantity</b>.",
 }
@@ -2446,6 +2714,8 @@ def sub_wizard_screen(step: str, draft: dict, error: str | None = None) -> Scree
     done = "\n".join(f"• {esc(k)}: <b>{esc(v)}</b>" for k, v in shown.items())
     body = f"Service: <b>{esc(g['name'])}</b>\n" + (f"{done}\n" if done else "") + "\n" + SUB_WIZ[step]
     info = draft.get("_info")
+    if step == "rate" and draft.get("Pay with"):
+        body = body.replace("price per 1,000", f"price in <b>{esc(draft['Pay with'].lower())}</b> per 1,000")
     if info and step in ("rate", "min", "max"):
         body += (f"\n\n{e('INFO')} <b>From API:</b> {esc(str(info.get('name', ''))[:70])}\n"
                  f"Cost {esc(info.get('rate', '?'))}/1K · {esc(info.get('min', '?'))}–{esc(info.get('max', '?'))}"
@@ -2454,6 +2724,8 @@ def sub_wizard_screen(step: str, draft: dict, error: str | None = None) -> Scree
     rows: list[list[InlineKeyboardButton]] = []
     if step == "type":
         rows = [[btn("Automatic (API)", "a:sw:t:a", icon="LIGHTNING", style="success"), btn("Manual", "a:sw:t:m", icon="EDIT", style="primary")]]
+    elif step == "cur":
+        rows = [[btn("Coins (free)", "a:sw:cur:coins", icon="COINS", style="primary"), btn("Gems (paid)", "a:sw:cur:gems", icon="GEM", style="success")]]
     elif step == "desc":
         rows = [[btn("Skip", "a:sw:skip", icon="NEXT")]]
     elif step == "url":
@@ -2503,6 +2775,9 @@ CONFIG_FIELDS: dict[str, tuple[str, str]] = {
     "deposit_expiry_minutes": ("Deposit expiry (minutes)", "int"),
     "log_channel": ("Log channel ID", "chat"),
     "draft_effects": ("Draft animations", "bool"),
+    "verify_contact": ("Contact verification", "bool"),
+    "allowed_phone_prefix": ("Allowed phone codes", "opt"),
+    "stars_contact": ("Stars payment contact", "url"),
 }
 
 
@@ -2518,13 +2793,16 @@ def admin_config_screen(note: str | None = None) -> Screen:
 
 
 def admin_packages_screen(note: str | None = None) -> Screen:
-    pk = cfg("coin_packages")
-    lines = [f"{i + 1}. <b>{c:,} coins</b> → {C.currency}{p:,}" for i, (c, p) in enumerate(pk)]
-    text = title("COINS", "Coin Packages") + ("\n".join(lines) or "No packages — users can't deposit.")
+    upi, stars = cfg("coin_packages"), cfg("star_packages")
+    lines = ([f"<b>{e('UPI')} UPI packages</b>"] + [f"{i + 1}. {g:,} gems → {C.currency}{p:,}" for i, (g, p) in enumerate(upi)]
+             + ["", f"<b>{e('STARS')} Stars packages</b>"] + [f"{i + 1}. {g:,} gems → {p:,} ⭐" for i, (g, p) in enumerate(stars)])
+    text = title("GEM", "Gem Packages") + "\n".join(lines) + f"\n\n{e('INFO')} Stars are sent manually to {esc(C.stars_contact)}."
     if note:
         text += f"\n\n{e('INFO')} {esc(note)}"
-    rows = [[btn(f"Remove {c:,} coins", f"a:pk:del:{i}", icon="CROSS", style="danger")] for i, (c, _) in enumerate(pk)]
-    return Screen(text, kb([btn("Add Package", "a:pk:add", icon="PLUS", style="success")], *rows,
+    rows = ([[btn(f"Remove UPI {g:,}", f"a:pk:del:{i}", icon="CROSS", style="danger")] for i, (g, _) in enumerate(upi)]
+            + [[btn(f"Remove ⭐ {g:,}", f"a:pk:sdel:{i}", icon="CROSS", style="danger")] for i, (g, _) in enumerate(stars)])
+    return Screen(text, kb([btn("Add UPI Package", "a:pk:add", icon="PLUS", style="success"),
+                            btn("Add Stars Package", "a:pk:sadd", icon="STARS", style="success")], *rows,
                            [btn("Back", "a", icon="BACK", style="danger")]))
 
 
@@ -2560,7 +2838,8 @@ def admin_user_screen(u: dict, orders: list[dict], note: str | None = None) -> S
                        for o in orders) or "  —"
     text = (title("USER", "User Profile") +
             f"<b>Name:</b> {esc(u.get('full_name', 'User'))}" + (f" · @{esc(u['username'])}" if u.get("username") else "") +
-            f"\n<b>ID:</b> <code>{uid}</code>\n<b>Coins:</b> {fmt_num(u.get('coins', 0))} · <b>Spent:</b> {fmt_num(u.get('spent', 0))}\n"
+            f"\n<b>ID:</b> <code>{uid}</code>\n<b>Coins:</b> {fmt_num(u.get('coins', 0))} · <b>Gems:</b> {fmt_num(u.get('gems', 0))}"
+            f" · <b>Verified:</b> {'✅' if u.get('verified') else '—'}\n"
             f"<b>Orders:</b> {u.get('orders_count', 0)} · <b>Referrals:</b> {u.get('referrals', 0)}\n"
             f"<b>Banned:</b> {'Yes' if u.get('banned') else 'No'} · <b>Blocked bot:</b> {'Yes' if u.get('blocked') else 'No'}\n"
             f"<b>Joined:</b> {fmt_dt(u.get('created_at'))}\n\n<b>Recent orders</b>\n{recent}")
@@ -2570,13 +2849,15 @@ def admin_user_screen(u: dict, orders: list[dict], note: str | None = None) -> S
            else btn("Ban", f"a:ub:ban:{uid}", icon="BAN", style="danger"))
     return Screen(text, kb([btn("Add Coins", f"a:uc:add:{uid}", icon="PLUS", style="success"),
                             btn("Remove Coins", f"a:uc:rem:{uid}", icon="MINUS", style="danger")],
+                           [btn("Add Gems", f"a:ug:add:{uid}", icon="GEM", style="success"),
+                            btn("Remove Gems", f"a:ug:rem:{uid}", icon="MINUS", style="danger")],
                            [ban, btn("Copy ID", copy=str(uid), icon="COPY")],
                            [btn("Find Another", "a:find", icon="SEARCH"), btn("Admin", "a", icon="BACK", style="danger")]))
 
 
-def admin_coins_prompt(uid: int, mode: str, error: str | None = None) -> Screen:
+def admin_coins_prompt(uid: int, mode: str, error: str | None = None, currency: str = "coins") -> Screen:
     verb = "add to" if mode == "add" else "remove from"
-    text = title("MONEY", "Adjust Coins") + f"How many coins to <b>{verb}</b> user <code>{uid}</code>?"
+    text = title("MONEY", f"Adjust {cur_key(currency).title()}") + f"How many {cur_key(currency)} to <b>{verb}</b> user <code>{uid}</code>?"
     if error:
         text += f"\n\n{e('ERROR')} <b>{esc(error)}</b>"
     return Screen(text, kb(cancel_btn(f"a:u:{uid}")))
@@ -2694,6 +2975,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if user.get("banned") and not is_admin(uid):
             await safe_answer(query, "🚫 You are banned from using this bot.", True)
             return
+        if needs_verify(user, uid):
+            await safe_answer(query, "🤖 Please verify first — share your contact below.", True)
+            await send_verify_prompt(update, context)
+            return
         missing = [] if fn is cb_join else await missing_channels(context.bot, uid)
         if missing:
             await render(update, context, join_screen(missing))
@@ -2728,6 +3013,88 @@ def clear_await(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 _maint_cache: list[float | bool] = [0.0, False]
+
+
+def needs_verify(user: dict, uid: int) -> bool:
+    return bool(cfg("verify_contact")) and not user.get("verified") and not is_admin(uid)
+
+
+async def send_verify_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, error: str | None = None) -> None:
+    """Contact-share gate (reply keyboard). Old prompts are removed so only one stays in the chat."""
+    bot, chat_id, ud = context.bot, update.effective_chat.id, context.user_data
+    share = KeyboardButton("📱 Share My Contact", request_contact=True,
+                           api_kwargs={k: v for k, v in (("style", "success"), ("icon_custom_emoji_id", get_id("PHONE"))) if v})
+    markup = ReplyKeyboardMarkup([[share]], resize_keyboard=True, one_time_keyboard=True,
+                                 input_field_placeholder="Tap the button below to verify")
+    old = ud.pop("verify_msg", None)
+    msg = await bot.send_message(chat_id, verify_text(error), reply_markup=markup)
+    ud["verify_msg"] = msg.message_id
+    if old:
+        await safe_delete(bot, chat_id, old)
+    panel = ud.pop(PANEL, None)
+    if panel:
+        await safe_delete(bot, chat_id, panel)
+
+
+def _phone_ok(phone: str) -> bool:
+    allowed = [p.strip().lstrip("+") for p in str(cfg("allowed_phone_prefix") or "").replace(" ", ",").split(",") if p.strip()]
+    digits = re.sub(r"\D", "", phone)
+    return not allowed or any(digits.startswith(p) for p in allowed)
+
+
+async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg, uid = update.effective_message, update.effective_user.id
+    contact = msg.contact
+    user, _ = await touch_user(update, fresh=True)
+    if user.get("verified"):
+        await safe_delete(context.bot, msg.chat_id, msg.message_id)
+        return
+    if not contact or (contact.user_id and contact.user_id != uid) or not contact.user_id:
+        await safe_delete(context.bot, msg.chat_id, msg.message_id)
+        return await send_verify_prompt(update, context, "Please share YOUR OWN contact with the button — not someone else's.")
+    phone = (contact.phone_number or "").strip()
+    if not phone or not _phone_ok(phone):
+        await safe_delete(context.bot, msg.chat_id, msg.message_id)
+        log_event("BAN", "Verification rejected", who(user) + "\nPhone country not allowed")
+        return await send_verify_prompt(update, context, "Sorry, numbers from your country aren't accepted here.")
+    digits = re.sub(r"\D", "", phone)
+    phone_hash = hashlib.sha256(f"{settings.bot_token[:12]}:{digits}".encode()).hexdigest()
+    ok, why = await store.mark_verified(uid, phone_hash, "+" + digits[:3])
+    await safe_delete(context.bot, msg.chat_id, msg.message_id)
+    if not ok:
+        log_event("BAN", "Verification rejected", who(user) + "\nPhone already used by another account")
+        return await send_verify_prompt(update, context, "This number is already linked to another account.")
+    _user_cache.pop(uid, None)
+    # remove the reply keyboard silently, then clean the prompt
+    try:
+        tmp = await context.bot.send_message(msg.chat_id, "✅", reply_markup=ReplyKeyboardRemove())
+        await safe_delete(context.bot, msg.chat_id, tmp.message_id)
+    except TelegramError:
+        pass
+    await safe_delete(context.bot, msg.chat_id, context.user_data.pop("verify_msg", None))
+    await reward_referrer(context.bot, uid, update.effective_user.first_name)
+    log_event("CHECK", "User verified", who(user))
+    await open_home_fresh(update, context)
+
+
+async def reward_referrer(bot, uid: int, first_name: str) -> None:
+    ref_id = await store.pay_referral(uid, C.referral_bonus)
+    if ref_id:
+        await notify(bot, ref_id, f"{e('REFERRAL')} <b>{fancy('Referral Confirmed')}</b>\n{HR}\n\n"
+                                  f"{e('COINS')} <b>+{C.referral_bonus} coins</b> — {esc(first_name)} joined and verified!")
+        log_event("REFERRAL", "Referral paid", f"<code>{ref_id}</code> +{C.referral_bonus} coins for <code>{uid}</code>")
+
+
+async def open_home_fresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    missing = await missing_channels(context.bot, uid)
+    if missing:
+        await render(update, context, join_screen(missing), force_new=True)
+        return
+    screen = home_screen(await store.get_user(uid) or {}, is_admin(uid))
+    await stream_typing(context.bot, update.effective_chat.id, screen.text)
+    clear_await(context)
+    await render(update, context, screen, force_new=True)
 
 
 async def maintenance_on() -> bool:
@@ -2765,6 +3132,11 @@ async def cb_join(update, context, args):
     return "✅ Welcome!"
 
 
+@route("plat")
+async def cb_platform(update, context, args):
+    await render(update, context, platform_screen(args[0] if args else "instagram"))
+
+
 @route("grp")
 async def cb_group(update, context, args):
     await render(update, context, group_screen(args[0] if args else ""))
@@ -2792,6 +3164,8 @@ async def start_order(update, context, kind: str, link: str | None = None) -> Re
 async def cb_service(update, context, args):
     kind = args[0] if args else ""
     link = context.user_data.pop("prefill_link", None) or (context.user_data.get(ORDER) or {}).get("link")
+    if link and kind in SERVICES and not validate_link(platform_of(kind), link)[0]:
+        link = None  # a Telegram link can't be used for an Instagram service (and vice versa)
     return await start_order(update, context, kind, link)
 
 
@@ -2810,7 +3184,7 @@ async def show_review(update, context, qty: int, note: str | None = None) -> Non
     draft.update(quantity=qty, coins=price_for(draft["kind"], qty))
     set_await(context, "order_comments" if draft.get("comments") else "order_qty")  # typing again updates it
     user = await store.get_user(update.effective_user.id) or {}
-    await render(update, context, review_screen(draft, int(user.get("coins", 0)), note))
+    await render(update, context, review_screen(draft, int(user.get(cur_key(service(draft["kind"]).get("currency")), 0)), note))
 
 
 @route("qty")
@@ -2883,15 +3257,16 @@ async def confirm_order(update, context) -> Result:
             await show_review(update, context, draft["quantity"], "The price was updated — please review again.")
             return "Price updated", True
         oid = new_id()
-        if not await store.change_coins(uid, -fresh_price, "order", oid):
+        cur = cur_key(spec.get("currency"))
+        if not await store.change_coins(uid, -fresh_price, "order", oid, currency=cur):
             await show_review(update, context, draft["quantity"])
-            return "❌ Insufficient balance.", True
+            return f"❌ Not enough {cur}.", True
         try:
             order = await store.create_order(oid, uid, kind, draft["link"], draft["quantity"], fresh_price, service(kind)["label"])
         except Exception:
-            await store.change_coins(uid, fresh_price, "order_rollback", oid)
+            await store.change_coins(uid, fresh_price, "order_rollback", oid, currency=cur)
             raise
-        extra = {"manual": spec.get("mode") != "auto", "can_refill": bool(spec.get("refill")),
+        extra = {"manual": spec.get("mode") != "auto", "can_refill": bool(spec.get("refill")), "currency": cur,
                  "can_cancel": bool(spec.get("cancel")) and spec.get("mode") == "auto"}
         if draft.get("comments"):
             extra["comments"] = draft["comments"]
@@ -2930,7 +3305,7 @@ async def place_order_flow(app: Application, order: dict, uid: int, chat_id: int
             f"{e('WARN')} Needs manual action: <i>{esc(error)}</i>")
     await notify_admins(bot, admin_order_text(fresh, user) + f"\n\n{note}", None if placed else admin_order_actions(fresh, back=False))
     log_event("ORDER", "New order" + (" · placed on API" if placed else " · manual" if fresh.get("manual") else " · needs action"),
-              who(user, uid) + "\n" + f"<code>#{esc(order_no(fresh))}</code> · {esc(order_svc(fresh)['label'])} · <b>{fresh['quantity']:,}</b> · {fresh['coins']} coins" + ("" if placed or fresh.get("manual") else f"\n⚠️ {esc(error)}"))
+              who(user, uid) + "\n" + f"<code>#{esc(order_no(fresh))}</code> · {esc(order_svc(fresh)['label'])} · <b>{fresh['quantity']:,}</b> · {money(fresh['coins'], fresh.get('currency'))}" + ("" if placed or fresh.get("manual") else f"\n⚠️ {esc(error)}"))
 
 
 @route("orders")
@@ -2990,7 +3365,7 @@ async def request_refill(bot, order: dict) -> str:
             fresh = await store.get_order(oid) or order
             await notify_admins(bot, f"{e('RETRY')} <b>{fancy('Refill Request')}</b>\n\n" + admin_order_text(fresh, await store.get_user(order["user_id"])),
                                 admin_order_actions(fresh, back=False))
-            log_event("RETRY", "Refill requested (manual)", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins")
+            log_event("RETRY", "Refill requested (manual)", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {money(order['coins'], order.get('currency'))}")
             return "♻️ Refill request sent to the team."
         cfg_ = _cfg_for_order(order)
         if not cfg_:
@@ -3000,7 +3375,7 @@ async def request_refill(bot, order: dict) -> str:
         except ProviderError as exc:
             return f"❌ Refill failed: {exc}"
         await store.update_order(oid, last_refill_at=utcnow(), refill_status="requested", refill_id=refill_id)
-    log_event("RETRY", "Refill requested (API)", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins")
+    log_event("RETRY", "Refill requested (API)", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {money(order['coins'], order.get('currency'))}")
     return "♻️ Refill requested successfully!"
 
 
@@ -3011,8 +3386,8 @@ async def request_cancel(bot, order: dict) -> str:
                                   completed_at=utcnow())
         if not done:
             return "This order can't be cancelled any more."
-        await notify_admins(bot, f"{e('CANCEL')} User cancelled manual order <code>#{oid}</code> — {order['coins']} coins refunded.")
-        return f"✅ Cancelled — {order['coins']} coins refunded."
+        await notify_admins(bot, f"{e('CANCEL')} User cancelled manual order <code>#{oid}</code> — {money(order['coins'], order.get('currency'))} refunded.")
+        return f"✅ Cancelled — {money(order['coins'], order.get('currency'))} refunded."
     if order["status"] != "processing" or not order.get("can_cancel") or order.get("manual"):
         return "This order can't be cancelled."
     if order.get("cancel_requested"):
@@ -3025,7 +3400,7 @@ async def request_cancel(bot, order: dict) -> str:
     except ProviderError as exc:
         return f"❌ Cancel failed: {exc}"
     await store.update_order(oid, cancel_requested=True, cancel_requested_at=utcnow())
-    log_event("CANCEL", "Cancel requested (API)", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins")
+    log_event("CANCEL", "Cancel requested (API)", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {money(order['coins'], order.get('currency'))}")
     return "✖️ Cancel requested — unused coins are refunded automatically once the panel confirms."
 
 
@@ -3045,22 +3420,36 @@ async def cb_wallet(update, context, args):
 @route("dep")
 async def cb_deposit(update, context, args):
     uid = update.effective_user.id
-    if args and args[0] == "p" and len(args) > 1 and args[1].isdigit():
+    act = args[0] if args else ""
+    if act in ("u", "s"):
+        clear_await(context)
+        await render(update, context, deposit_packages_screen("stars" if act == "s" else "upi"))
+        return None
+    if act in ("p", "sp") and len(args) > 1 and args[1].isdigit():
+        stars = act == "sp"
+        pk = cfg("star_packages") if stars else cfg("coin_packages")
         idx = int(args[1])
-        if idx >= len(C.coin_packages):
+        if idx >= len(pk):
             return "Package not available.", True
-        coins, price = C.coin_packages[idx]
-        dep = await store.create_deposit(uid, coins, price, C.deposit_expiry_minutes)
+        gems, price = pk[idx]
+        dep = await store.create_deposit(uid, int(gems), int(price), C.deposit_expiry_minutes, method="stars" if stars else "upi")
         set_await(context, "deposit_proof", deposit_id=dep["deposit_id"])
         await render(update, context, deposit_pay_screen(dep))
         return None
-    if args and args[0] == "x":
+    if act == "sent":
+        state = context.user_data.get(AWAIT) or {}
+        if state.get("kind") != "deposit_proof":
+            await render(update, context, deposit_menu_screen())
+            return "This request expired — start again.", True
+        await submit_deposit(update, context, state, utr="stars-sent")
+        return "✅ Sent to admins"
+    if act == "x":
         state = context.user_data.get(AWAIT) or {}
         if state.get("deposit_id"):
             await store.transition_deposit(state["deposit_id"], ["awaiting_proof"], "cancelled")
         clear_await(context)
         await cb_wallet(update, context, [])
-        return "Deposit cancelled."
+        return "Cancelled."
     clear_await(context)
     await render(update, context, deposit_menu_screen())
 
@@ -3171,17 +3560,17 @@ async def cb_admin_order_action(update, context, args):
         await notify(bot, order["user_id"], f"{e('DONE')} <b>{fancy('Order Completed')}</b>\n\n<code>#{oid}</code> has been fulfilled. Thank you!",
                      _order_markup(oid))
         order, toast = updated, "✅ Marked complete"
-        log_event("DONE", "Order marked complete", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins" + f"\nby admin <code>{update.effective_user.id}</code>")
+        log_event("DONE", "Order marked complete", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {money(order['coins'], order.get('currency'))}" + f"\nby admin <code>{update.effective_user.id}</code>")
     elif action == "ref":
         updated = await refund_order(bot, order, "refunded", order["coins"], "admin_refund", ["pending", "processing"],
                                      completed_at=utcnow(), completed_by=update.effective_user.id)
         if not updated:
             return f"Order is already {order['status']}.", True
         await notify(bot, order["user_id"], f"{e('REFUND')} <b>{fancy('Order Refunded')}</b>\n\n<code>#{oid}</code> was cancelled. "
-                                            f"<b>{order['coins']}</b> coins returned to your wallet.", _order_markup(oid))
+                                            f"<b>{money(order['coins'], order.get('currency'))}</b> returned to your wallet.", _order_markup(oid))
         note = "If it was already placed on the provider, cancel it there too." if order["status"] == "processing" else None
         order, toast = updated, "↩️ Refunded"
-        log_event("REFUND", "Order refunded by admin", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins" + f"\nby admin <code>{update.effective_user.id}</code>")
+        log_event("REFUND", "Order refunded by admin", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {money(order['coins'], order.get('currency'))}" + f"\nby admin <code>{update.effective_user.id}</code>")
     elif action == "retry":
         placed, error = await auto_place(order)
         order = await store.get_order(oid) or order
@@ -3227,7 +3616,7 @@ async def approve_manual(update, context, oid: str, external_id: str | None) -> 
                  + "\nDelivery is in progress.", _order_markup(oid))
     await render(update, context, Screen(admin_order_text(order, await store.get_user(order["user_id"]), "Approved ✅"),
                                          admin_order_actions(order)))
-    log_event("CHECK", "Manual order approved", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {order['coins']} coins" + (f"\nOrder ID: <code>{esc(external_id)}</code>" if external_id else "")
+    log_event("CHECK", "Manual order approved", f"<code>#{esc(order_no(order))}</code> · {esc(order_svc(order)['label'])} · <b>{order['quantity']:,}</b> · {money(order['coins'], order.get('currency'))}" + (f"\nOrder ID: <code>{esc(external_id)}</code>" if external_id else "")
               + f"\nby admin <code>{update.effective_user.id}</code>")
     return "✅ Approved"
 
@@ -3280,9 +3669,9 @@ async def cb_admin_deposit_action(update, context, args):
         current = await store.get_deposit(did)
         return (f"Already {current['status']}." if current else "Deposit not found."), True
     if approve:
-        user = await store.change_coins(dep["user_id"], int(dep["coins"]), "deposit", did)
-        await notify(context.bot, dep["user_id"], f"{e('CHECK')} <b>{fancy('Deposit Approved')}</b>\n\n<b>+{dep['coins']:,} coins</b> added. "
-                                                  f"New balance: <b>{fmt_num((user or {}).get('coins', 0))}</b>",
+        user = await store.change_coins(dep["user_id"], int(dep["coins"]), "deposit", did, currency=dep.get("currency", "coins"))
+        await notify(context.bot, dep["user_id"], f"{e('CHECK')} <b>{fancy('Payment Approved')}</b>\n\n<b>+{money(dep['coins'], dep.get('currency'))}</b> added. "
+                                                  f"New balance: <b>{money((user or {}).get(cur_key(dep.get('currency')), 0), dep.get('currency'))}</b>",
                      kb([btn("Start Order", "home", icon="ROCKET", style="success")]))
     else:
         await notify(context.bot, dep["user_id"], f"{e('CROSS')} <b>{fancy('Deposit Rejected')}</b>\n\nDeposit <code>#{did}</code> was rejected. "
@@ -3290,7 +3679,7 @@ async def cb_admin_deposit_action(update, context, args):
                      kb([btn("Support", url=C.support_url, icon="SUPPORT")]))
     stamp = f"\n\n{e('DONE')} <b>{'Approved' if approve else 'Rejected'}</b> by <code>{update.effective_user.id}</code>"
     log_event("CHECK" if approve else "CROSS", f"Deposit {'approved' if approve else 'rejected'}",
-              f"<code>#{did}</code> · user <code>{dep['user_id']}</code> · {dep['coins']:,} coins · {C.currency}{dep['price']:,}"
+              f"<code>#{did}</code> · user <code>{dep['user_id']}</code> · {money(dep['coins'], dep.get('currency'))} · {deposit_price(dep)}"
               f"\nby admin <code>{update.effective_user.id}</code>")
     base = deposit_admin_text(dep, await store.get_user(dep["user_id"]))
     back = kb([btn("Deposits", "a:deps", icon="BACK", style="danger")]) if _is_panel(update, context) else None
@@ -3301,7 +3690,7 @@ async def cb_admin_deposit_action(update, context, args):
 @route("a:sv", admin=True)
 async def cb_admin_services(update, context, args):
     clear_await(context)
-    await render(update, context, admin_services_screen())
+    await render(update, context, admin_services_screen(platform=args[0] if args else None))
 
 
 @route("a:g", admin=True)
@@ -3379,12 +3768,13 @@ async def cb_admin_user(update, context, args):
         return "User not found.", True
 
 
-@route("a:uc", admin=True)
+@route("a:uc", "a:ug", admin=True)
 async def cb_admin_user_coins(update, context, args):
     if len(args) < 2 or args[0] not in ("add", "rem") or not args[1].isdigit():
         return None
-    set_await(context, "user_coins", mode=args[0], target=int(args[1]), admin=True)
-    await render(update, context, admin_coins_prompt(int(args[1]), args[0]))
+    cur = "gems" if update.callback_query.data.startswith("a:ug") else "coins"
+    set_await(context, "user_coins", mode=args[0], target=int(args[1]), currency=cur, admin=True)
+    await render(update, context, admin_coins_prompt(int(args[1]), args[0], currency=cur))
 
 
 @route("a:ub", admin=True)
@@ -3578,15 +3968,17 @@ async def cb_admin_service_delete(update, context, args):
 # ---------------- services (groups)
 @route("a:gadd", admin=True)
 async def cb_admin_group_add(update, context, args):
-    context.user_data["grp_draft"] = {}
+    context.user_data["grp_draft"] = {"platform": args[0] if args and args[0] in PLATFORMS else "instagram"}
     set_await(context, "grp_wizard", step="name", admin=True)
-    await render(update, context, prompt_screen("PLUS", "Add Service", GROUP_WIZ["name"], cancel="a:sv"))
+    await render(update, context, prompt_screen("PLUS", f"Add {PLATFORMS[context.user_data['grp_draft'].get('platform', 'instagram')]['name']} Service", GROUP_WIZ["name"], cancel="a:sv"))
 
 
 async def finish_group_wizard(update, context, draft: dict) -> None:
     gid = "g" + new_id()[:6].lower()
-    GROUPS[gid] = {**GROUP_DEFAULTS, "name": draft["name"], "description": draft.get("description", ""),
-                   "emoji_key": guess_emoji(draft["name"]), "style": STYLES[len(GROUPS) % len(STYLES)]}
+    plat = draft.get("platform", "instagram")
+    GROUPS[gid] = {**GROUP_DEFAULTS, "name": draft["name"], "description": draft.get("description", ""), "platform": plat,
+                   "emoji_key": guess_emoji(draft["name"]) if guess_emoji(draft["name"]) != "STAR" else PLATFORMS[plat]["emoji_key"],
+                   "style": STYLES[len(GROUPS) % len(STYLES)]}
     await save_services()
     context.user_data.pop("grp_draft", None)
     await start_sub_wizard(update, context, gid, note=f"Service “{draft['name']}” created. Now add its first sub-service.")
@@ -3680,6 +4072,28 @@ async def cb_admin_group_colour(update, context, args):
     return {"danger": "🔴 Red", "primary": "🔵 Blue", "success": "🟢 Green"}[GROUPS[gid]["style"]]
 
 
+@route("a:gp", admin=True)
+async def cb_admin_group_platform(update, context, args):
+    gid = args[0] if args else ""
+    if gid not in GROUPS:
+        return None
+    GROUPS[gid]["platform"] = "instagram" if GROUPS[gid].get("platform") == "telegram" else "telegram"
+    await save_services()
+    await render(update, context, admin_group_screen(gid, f"Moved to {PLATFORMS[GROUPS[gid]['platform']]['name']}."))
+    return f"➡️ {PLATFORMS[GROUPS[gid]['platform']]['name']}"
+
+
+@route("a:scur", admin=True)
+async def cb_admin_sub_currency(update, context, args):
+    kind = args[0] if args else ""
+    if kind not in SERVICES:
+        return None
+    SERVICES[kind]["currency"] = "coins" if cur_key(SERVICES[kind].get("currency")) == "gems" else "gems"
+    await save_services()
+    await render(update, context, admin_sub_screen(kind, f"Users now pay with {SERVICES[kind]['currency']}."))
+    return f"{cur_plain(SERVICES[kind]['currency'])} {SERVICES[kind]['currency'].title()}"
+
+
 @route("a:gx", admin=True)
 async def cb_admin_group_toggle(update, context, args):
     gid = args[0] if args else ""
@@ -3697,12 +4111,14 @@ async def cb_admin_group_delete(update, context, args):
     if gid not in GROUPS:
         return "Not found.", True
     subs = subs_of(gid, enabled_only=False)
+    plat = GROUPS[gid].get("platform", "instagram")
     if len(args) > 1 and args[1] == "y":
         name = GROUPS.pop(gid)["name"]
         for k in subs:
             SERVICES.pop(k, None)
         await save_services()
-        await render(update, context, admin_services_screen(f"Deleted {name} and {len(subs)} sub-service(s). Existing orders are kept."))
+        await render(update, context, admin_services_screen(f"Deleted {name} and {len(subs)} sub-service(s). Existing orders are kept.",
+                                                            platform=plat))
         return "🗑 Deleted"
     await render(update, context, confirm_screen("Delete Service?", f"<b>{esc(GROUPS[gid]['name'])}</b> and its <b>{len(subs)}</b> "
                                                  "sub-service(s) will be removed. Existing orders stay safe.", f"a:gdel:{gid}:y", f"a:g:{gid}"))
@@ -3750,6 +4166,7 @@ async def finish_sub_wizard(update, context, draft: dict) -> None:
     kind = "s" + new_id()[:7].lower()
     sp = {**SUB_DEFAULTS, "group": gid, "name": draft["Name"], "description": draft.get("Description", ""),
           "mode": "auto" if auto else "manual", "rate_per_1k": draft["Price /1K"], "min": lo, "max": hi,
+          "currency": "gems" if draft.get("Pay with") == "Gems" else "coins",
           "step": 100 if lo % 100 == 0 and hi % 100 == 0 and lo >= 100 else 1, "enabled": True}
     if auto:
         sp.update(api_url=draft["API URL"], api_key=draft["_key"], service_id=draft["Service ID"])
@@ -3771,6 +4188,9 @@ async def cb_admin_sub_wizard(update, context, args):
     act = args[0]
     if act == "t" and len(args) > 1:
         draft["Type"] = "Automatic" if args[1] == "a" else "Manual"
+        return await sub_step(update, context, draft, "cur")
+    if act == "cur" and len(args) > 1:
+        draft["Pay with"] = "Gems" if args[1] == "gems" else "Coins"
         return await sub_step(update, context, draft, "name")
     if act == "skip":
         draft["Description"] = ""
@@ -3813,6 +4233,8 @@ async def in_sub_wizard(update, context, state, text):
     step, value = state.get("step", "type"), text.strip()
     if step == "type":
         return await sub_step(update, context, draft, "type", "Tap Automatic or Manual below.")
+    if step == "cur":
+        return await sub_step(update, context, draft, "cur", "Tap Coins or Gems below.")
     if step == "name":
         name = re.sub(r"\s+", " ", value)[:40]
         if len(name) < 1:
@@ -4086,34 +4508,43 @@ async def in_config_field(update, context, state, text):
 # ------------------------------------------------------------ admin: coin packages -
 @route("a:pk", admin=True)
 async def cb_admin_packages(update, context, args):
-    if args and args[0] == "add":
-        set_await(context, "pkg_add", admin=True)
-        await render(update, context, prompt_screen("COINS", "Add Package", f"Send <b>coins</b> and <b>price</b> separated by a space.\n"
-                                                    f"Example: <code>500 450</code> → 500 coins for {esc(C.currency)}450", cancel="a:pk"))
+    act = args[0] if args else ""
+    if act in ("add", "sadd"):
+        stars = act == "sadd"
+        set_await(context, "pkg_add", stars=stars, admin=True)
+        unit = "Stars" if stars else f"price in {esc(C.currency)}"
+        await render(update, context, prompt_screen("GEM", "Add Stars Package" if stars else "Add UPI Package",
+                                                    f"Send <b>gems</b> and <b>{unit}</b> separated by a space.\n"
+                                                    f"Example: <code>500 450</code> → 500 gems for 450 {'⭐' if stars else esc(C.currency)}",
+                                                    cancel="a:pk"))
         return None
     clear_await(context)
     note = None
-    pk = [list(x) for x in cfg("coin_packages")]
-    if args and args[0] == "del" and len(args) > 1 and args[1].isdigit() and int(args[1]) < len(pk):
-        coins, _ = pk.pop(int(args[1]))
-        CONFIG["coin_packages"] = pk
-        await save_config()
-        note = f"Removed the {coins:,} coins package."
+    if act in ("del", "sdel") and len(args) > 1 and args[1].isdigit():
+        key = "star_packages" if act == "sdel" else "coin_packages"
+        pk = [list(x) for x in cfg(key)]
+        if int(args[1]) < len(pk):
+            gems, _ = pk.pop(int(args[1]))
+            CONFIG[key] = pk
+            await save_config()
+            note = f"Removed the {gems:,} gems package."
     await render(update, context, admin_packages_screen(note))
 
 
 @on_input("pkg_add")
 async def in_package_add(update, context, state, text):
+    key = "star_packages" if state.get("stars") else "coin_packages"
     nums = re.findall(r"\d+", text.replace(",", ""))
     if len(nums) != 2 or int(nums[0]) <= 0 or int(nums[1]) <= 0:
-        return await render(update, context, prompt_screen("COINS", "Add Package", "Send coins and price, e.g. <code>500 450</code>.",
+        return await render(update, context, prompt_screen("GEM", "Add Package", "Send gems and price, e.g. <code>500 450</code>.",
                                                            "Send exactly two positive numbers.", "a:pk"))
-    pk = [list(x) for x in cfg("coin_packages") if int(x[0]) != int(nums[0])]
+    pk = [list(x) for x in cfg(key) if int(x[0]) != int(nums[0])]
     pk.append([int(nums[0]), int(nums[1])])
-    CONFIG["coin_packages"] = sorted(pk)[:12]
+    CONFIG[key] = sorted(pk)[:12]
     await save_config()
     clear_await(context)
-    await render(update, context, admin_packages_screen(f"Added {int(nums[0]):,} coins for {C.currency}{int(nums[1]):,}."))
+    unit = "⭐" if state.get("stars") else C.currency
+    await render(update, context, admin_packages_screen(f"Added {int(nums[0]):,} gems for {int(nums[1]):,} {unit}."))
 
 
 # ======================================================================================
@@ -4135,16 +4566,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user.get("banned") and not is_admin(uid):
         await render(update, context, banned_screen())
         return
+    if needs_verify(user, uid):
+        await send_verify_prompt(update, context)
+        return
     missing = await missing_channels(context.bot, uid)
     if missing:
         await render(update, context, join_screen(missing))
         return
     text = (update.effective_message.text or "").strip()
     if not state:
-        ok, link = validate_instagram_url(text)
-        if ok:  # smart shortcut: paste a link from anywhere
+        plat, link = detect_link(text)
+        if plat and groups(platform=plat):  # smart shortcut: paste a link from anywhere
             context.user_data["prefill_link"] = link
-            await render(update, context, pick_service_screen(link))
+            await render(update, context, pick_service_screen(link, plat))
         else:
             await go_home(update, context)
         return
@@ -4199,9 +4633,10 @@ async def in_order_link(update, context, state, text):
         clear_await(context)
         await render(update, context, expired_screen())
         return
-    ok, link = validate_instagram_url(text)
+    plat = platform_of(draft["kind"])
+    ok, link = validate_link(plat, text)
     if not ok:
-        await render(update, context, link_prompt(draft["kind"], "That isn't a valid public Instagram post/reel link."))
+        await render(update, context, link_prompt(draft["kind"], f"That isn't a valid {PLATFORMS[plat]['link']} link."))
         return
     if draft["kind"] not in SERVICES:
         clear_await(context)
@@ -4230,7 +4665,7 @@ async def in_order_qty(update, context, state, text):
         clear_await(context)
         await render(update, context, expired_screen())
         return
-    ok, link = validate_instagram_url(text)
+    ok, link = validate_link(platform_of(draft["kind"]), text)
     if ok:  # user pasted a new link instead of a number
         draft["link"] = link
         draft.pop("quantity", None)
@@ -4298,7 +4733,7 @@ async def submit_deposit(update, context, state: dict, *, file_id: str | None = 
     await render(update, context, deposit_sent_screen(dep))
     user = await store.get_user(dep["user_id"])
     await notify_admins(context.bot, deposit_admin_text(dep, user), deposit_admin_actions(did), photo=file_id)
-    log_event("DEPOSIT", "Deposit proof submitted", who(user) + f"\n<code>#{did}</code> · {dep['coins']:,} coins · {C.currency}{dep['price']:,}"
+    log_event("DEPOSIT", "Deposit proof submitted", who(user) + f"\n<code>#{did}</code> · {money(dep['coins'], dep.get('currency'))} · {deposit_price(dep)}"
               + (f" · UTR <code>{esc(utr)}</code>" if utr else "") + (" · 🖼 screenshot" if file_id else ""))
 
 
@@ -4363,27 +4798,29 @@ async def in_find_user(update, context, state, text):
 
 @on_input("user_coins")
 async def in_user_coins(update, context, state, text):
-    uid, mode = state["target"], state["mode"]
+    uid, mode, cur = state["target"], state["mode"], cur_key(state.get("currency"))
     try:
         amount = int(text.replace(",", ""))
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await render(update, context, admin_coins_prompt(uid, mode, "Send a positive whole number."))
+        await render(update, context, admin_coins_prompt(uid, mode, "Send a positive whole number.", cur))
         return
     clear_await(context)
     if mode == "add":
-        user = await store.change_coins(uid, amount, "admin_add")
+        user = await store.change_coins(uid, amount, "admin_add", currency=cur)
     else:
-        user = await store.remove_coins_clamped(uid, amount, "admin_remove")
+        user = await store.remove_coins_clamped(uid, amount, "admin_remove", currency=cur)
     if not user:
         await render(update, context, admin_find_prompt("User not found."))
         return
+    _user_cache.pop(uid, None)
+    sign = "+" if mode == "add" else "-"
     await notify(context.bot, uid, f"{e('MONEY')} <b>{fancy('Wallet Updated')}</b>\n\n"
-                                   f"{'+' if mode == 'add' else '-'}{amount} coins by the operator.\nNew balance: <b>{fmt_num(user['coins'])}</b>")
-    await show_admin_user(update, context, uid, f"{'Added' if mode == 'add' else 'Removed'} {amount} coins.")
-    log_event("MONEY", f"Coins {'added' if mode == 'add' else 'removed'} by admin",
-              who(user) + f"\n{'+' if mode == 'add' else '-'}{amount} coins · balance {fmt_num(user['coins'])}\nby admin <code>{update.effective_user.id}</code>")
+                                   f"{sign}{money(amount, cur)} by the operator.\nNew balance: <b>{money(user.get(cur, 0), cur)}</b>")
+    await show_admin_user(update, context, uid, f"{'Added' if mode == 'add' else 'Removed'} {money(amount, cur)}.")
+    log_event("MONEY", f"{cur.title()} {'added' if mode == 'add' else 'removed'} by admin",
+              who(user) + f"\n{sign}{money(amount, cur)} · balance {money(user.get(cur, 0), cur)}\nby admin <code>{update.effective_user.id}</code>")
 
 
 @on_input("code_wizard")
@@ -4434,23 +4871,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user.get("banned") and not is_admin(uid):
         await render(update, context, banned_screen(), force_new=True)
         return
-    if is_new and context.args:
-        raw = context.args[0].strip().lower().removeprefix("ref")
-        if raw.isdigit() and await store.claim_referral(uid, int(raw), C.referral_bonus):
-            await notify(context.bot, int(raw), f"{e('REFERRAL')} <b>{fancy('Referral Confirmed')}</b>\n{HR}\n\n"
-                                                f"{e('GEM')} <b>+{C.referral_bonus} coins</b> — "
-                                                f"{esc(update.effective_user.first_name)} joined with your link!")
     if is_new:
-        ref = user.get("referred_by") or (await store.get_user(uid) or {}).get("referred_by")
-        log_event("NEW_USER", "New user", who(user) + (f"\nReferred by <code>{ref}</code>" if ref else ""))
-    missing = await missing_channels(context.bot, uid)
-    if missing:
-        await render(update, context, join_screen(missing), force_new=True)
+        ref = None
+        if context.args:
+            raw = context.args[0].strip().lower().removeprefix("ref")
+            if raw.isdigit() and await store.set_referrer(uid, int(raw)):
+                ref = int(raw)
+        log_event("NEW_USER", "New user", who(user) + (f"\nReferred by <code>{ref}</code> (paid after verification)" if ref else ""))
+        if not cfg("verify_contact"):
+            await reward_referrer(context.bot, uid, update.effective_user.first_name)
+    if needs_verify(user, uid):
+        await send_verify_prompt(update, context)
         return
-    screen = home_screen(await store.get_user(uid) or user, is_admin(uid))
-    await stream_typing(context.bot, update.effective_chat.id, screen.text)
-    clear_await(context)
-    await render(update, context, screen, force_new=True)
+    await open_home_fresh(update, context)
 
 
 def _command_screen(builder: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[Screen | None]], admin: bool = False):
@@ -4461,6 +4894,9 @@ def _command_screen(builder: Callable[[Update, ContextTypes.DEFAULT_TYPE], Await
             return
         if user.get("banned") and not is_admin(update.effective_user.id):
             await render(update, context, banned_screen(), force_new=True)
+            return
+        if needs_verify(user, update.effective_user.id):
+            await send_verify_prompt(update, context)
             return
         clear_await(context)
         screen = await builder(update, context)
@@ -4627,6 +5063,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("help", _command_screen(_scr_help), filters=private))
     app.add_handler(CommandHandler("admin", _command_screen(_scr_admin, admin=True), filters=private))
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(private & filters.CONTACT, on_contact))
     app.add_handler(MessageHandler(private & filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(MessageHandler(private & ~filters.COMMAND & ~filters.TEXT & ~filters.StatusUpdate.ALL, on_media))
     app.add_error_handler(error_handler)
