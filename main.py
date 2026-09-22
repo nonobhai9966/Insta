@@ -183,6 +183,8 @@ def config_defaults() -> dict[str, Any]:
             "daily_cooldown_hours": settings.daily_cooldown_hours, "deposit_expiry_minutes": settings.deposit_expiry_minutes,
             "log_channel": (os.getenv("LOG_CHANNEL") or "").strip(), "draft_effects": settings.message_drafts,
             "star_packages": [[100, 100], [500, 450], [1000, 850]],
+            "coins_upi_packages": [[100, 10], [500, 45], [1000, 80]],
+            "coins_star_packages": [[100, 10], [500, 45], [1000, 80]],
             "stars_contact": (os.getenv("STARS_CONTACT") or "https://t.me/verifiednalayak").strip(),
             "verify_contact": True, "allowed_phone_prefix": ""}
 
@@ -200,6 +202,15 @@ C = _Cfg()  # C.currency, C.support_url … always the live value
 
 
 CURRENCIES = ("coins", "gems")   # coins = free (bonus/referral/redeem) · gems = bought (UPI / Stars)
+
+
+# (currency, method) -> config key holding [[amount, price], ...]
+PACK_KEYS = {("gems", "upi"): "coin_packages", ("gems", "stars"): "star_packages",
+             ("coins", "upi"): "coins_upi_packages", ("coins", "stars"): "coins_star_packages"}
+
+
+def packages(cur: str, method: str) -> list[list[int]]:
+    return [list(x) for x in cfg(PACK_KEYS[(cur_key(cur), "stars" if method == "stars" else "upi")])]
 
 
 def cur_key(cur: str | None) -> str:
@@ -251,9 +262,11 @@ def new_id() -> str:
 # ======================================================================================
 # PREMIUM EMOJI — yahan apni custom emoji ID daalo (sirf digits), quotes ke andar.
 # Khali "" chhodoge to normal emoji dikhega. Bot owner ke paas Telegram Premium hona zaroori hai.
-# Example:  "HEART": "5250903242417415799",
+# Example:  "HEART": "6086741439012669399",
 # ======================================================================================
 PREMIUM_EMOJI_IDS: dict[str, str] = {
+    "TELEGRAM": "5296432770392791386",    # ✈️
+    "STARS": "",           # ⭐
     "ROBOT": "6070964971867477673",       # 🤖 (from captcha file)
     "PHONE": "5465169893580086142",       # 📱 (from captcha file)
     "INSTA": "5312476345849094587",       # 📸 Instagram
@@ -286,7 +299,7 @@ PREMIUM_EMOJI_IDS: dict[str, str] = {
     "GIFT": "5463064457661934722",        # 🎁
     "CREDIT": "5267409292666898509",      # 💰
     "HEART": "5388790256772331442",       # ❤️
-    "EYE": "5463379454858392371",         # 👁️
+    "EYE": "5334778027958087414",         # 👁️
     "ORDER": "5992390297533816030",       # 📦
     "LINK": "6030864215139422409",        # 🔗
     "SETTING": "5341715473882955310",     # ⚙️
@@ -980,10 +993,11 @@ class MongoStore:
         return res.modified_count
 
     # ---- deposits --------------------------------------------------------------------
-    async def create_deposit(self, uid: int, coins: int, price: int, expiry_minutes: int, method: str = "upi") -> dict:
+    async def create_deposit(self, uid: int, coins: int, price: int, expiry_minutes: int, method: str = "upi",
+                             currency: str = "gems") -> dict:
         now = utcnow()
         await self.deposits.update_many({"user_id": uid, "status": "awaiting_proof"}, {"$set": {"status": "cancelled"}})
-        dep = {"deposit_id": new_id(), "user_id": uid, "coins": coins, "currency": "gems", "method": method,
+        dep = {"deposit_id": new_id(), "user_id": uid, "coins": coins, "currency": cur_key(currency), "method": method,
                "price": price, "status": "awaiting_proof",
                "expires_at": now + timedelta(minutes=expiry_minutes), "created_at": now}
         await self.deposits.insert_one(dict(dep))
@@ -1256,12 +1270,12 @@ class MemoryStore:
                 order["status"], count = "pending", count + 1
         return count
 
-    async def create_deposit(self, uid, coins, price, expiry_minutes, method="upi"):
+    async def create_deposit(self, uid, coins, price, expiry_minutes, method="upi", currency="gems"):
         for dep in self.deposits.values():
             if dep["user_id"] == uid and dep["status"] == "awaiting_proof":
                 dep["status"] = "cancelled"
         now = utcnow()
-        dep = {"deposit_id": new_id(), "user_id": uid, "coins": coins, "currency": "gems", "method": method,
+        dep = {"deposit_id": new_id(), "user_id": uid, "coins": coins, "currency": cur_key(currency), "method": method,
                "price": price, "status": "awaiting_proof",
                "expires_at": now + timedelta(minutes=expiry_minutes), "created_at": now}
         self.deposits[dep["deposit_id"]] = dep
@@ -2057,22 +2071,62 @@ def home_screen(user: dict, admin: bool) -> Screen:
     return Screen(text, kb(*zigzag(buttons)), rich)
 
 
+def group_rates(gid: str) -> dict[str, float]:
+    """Cheapest rate per currency used inside the service."""
+    best: dict[str, float] = {}
+    for k in subs_of(gid):
+        cur, rate = cur_key(SERVICES[k].get("currency")), float(SERVICES[k]["rate_per_1k"])
+        best[cur] = min(best.get(cur, rate), rate)
+    return best
+
+
+def group_price(gid: str, rich: bool = False) -> str:
+    """'10 💎 per 1,000 likes' (or 'from 10 💎 …' when several sub-services have different prices)."""
+    best = group_rates(gid)
+    if not best:
+        return "—"
+    kinds = subs_of(gid)
+    unit = SERVICES[kinds[0]].get("unit") or "units"
+    varied = len({float(SERVICES[k]["rate_per_1k"]) for k in kinds}) > 1
+    icon = (lambda c: cur_plain(c)) if rich else (lambda c: cur_icon(c))
+    parts = " · ".join(f"<b>{fmt_num(v)}</b> {icon(c)}" for c, v in best.items())
+    return f"{'from ' if varied else ''}{parts} per 1,000 {esc(unit)}"
+
+
 def platform_screen(platform: str) -> Screen:
     info = PLATFORMS.get(platform)
     gids = groups(platform=platform) if info else []
     if not gids:
         return Screen(title("WARN", "Unavailable") + "No services here right now.", kb(home_btn()))
-    lines, buttons = [], []
+    cards, rich_rows, rich_items = [], [], []
     for gid in gids:
         g, kinds = GROUPS[gid], subs_of(gid)
-        low = min(float(SERVICES[k]["rate_per_1k"]) for k in kinds)
-        curs = {SERVICES[k].get("currency", "coins") for k in kinds}
-        price = f"from {fmt_num(low)}" + (cur_icon(next(iter(curs))) if len(curs) == 1 else "") + "/K"
-        lines.append(f"{e(g['emoji_key'])} <b>{esc(g['name'])}</b> — {price}" + (f"\n   <i>{esc(g['description'])}</i>" if g.get("description") else ""))
-        buttons.append(btn(g["name"][:22], f"svc:{kinds[0]}" if len(kinds) == 1 else f"grp:{gid}", icon=g["emoji_key"], style=g["style"]))
-    text = (title(info["emoji_key"], f"{info['name']} Services") + "\n\n".join(lines)
-            + f"\n\n{e('INFO')} {e('COINS')} = free coins · {e('GEM')} = gems")
-    return Screen(text, kb(*zigzag(buttons), [btn("Back", "home", icon="BACK", style="danger")]))
+        tags = []
+        if any(SERVICES[k].get("refill") for k in kinds):
+            tags.append(f"{e('RETRY')} Refill")
+        if len(kinds) > 1:
+            tags.append(f"{e('LIGHTNING')} {len(kinds)} speeds")
+        card = f"<blockquote>{e(g['emoji_key'])} <b>{esc(g['name'])}</b>\n{group_price(gid)}"
+        if tags:
+            card += "\n" + "  ·  ".join(tags)
+        if g.get("description"):
+            card += f"\n<i>{esc(g['description'])}</i>"
+        cards.append(card + "</blockquote>")
+        rich_rows.append((f"{re_(g['emoji_key'])} {esc(g['name'])}", _plain(group_price(gid, rich=True))))
+        if g.get("description"):
+            rich_items.append(f"<li><b>{esc(g['name'])}</b> — {esc(g['description'])}</li>")
+    text = (title(info["emoji_key"], f"{info['name']} Services") + "\n".join(cards)
+            + f"\n\n{e('INFO')} {e('COINS')} <b>Coins</b> are free — bonus, referrals & codes."
+            + f"\n{e('GEM')} <b>Gems</b> are bought from <b>Wallet</b>."
+            + f"\n\n{e('DOWN')} <b>{fancy('Tap A Service To Order')}</b>")
+    rich = (rich_card(info["emoji_key"], f"{info['name']} Services", rich_rows,
+                      [f"<i>{re_('DOWN')} Tap a service below to order.</i>"])
+            + (f"<ul>{''.join(rich_items)}</ul>" if rich_items else "")
+            + f"<p>{re_('COINS')} <b>Coins</b> are free (bonus, referrals, codes) · "
+              f"{re_('GEM')} <b>Gems</b> are bought from the Wallet.</p>")
+    buttons = [btn(GROUPS[g]["name"][:22], f"svc:{subs_of(g)[0]}" if len(subs_of(g)) == 1 else f"grp:{g}",
+                   icon=GROUPS[g]["emoji_key"], style=GROUPS[g]["style"]) for g in gids]
+    return Screen(text, kb(*zigzag(buttons), [btn("Back", "home", icon="BACK", style="danger")]), rich)
 
 
 def group_screen(gid: str) -> Screen:
@@ -2168,7 +2222,7 @@ def review_screen(draft: dict, balance: int, note: str | None = None) -> Screen:
         text += f"{e('INFO')} This is a manual service — an admin will approve it and share an Order ID.\n"
     text += (f"{e('WARN')} Confirm only if the link is <b>public</b> and correct."
              if enough else f"{e('ERROR')} <b>Insufficient {cur_key(cur)}</b> — you need <b>{money(coins - balance, cur)}</b> more."
-             + ("" if enough or cur_key(cur) == "coins" else f"\n{e('GEM')} Gems can be bought from <b>Wallet → Buy Gems</b>."))
+             + ("" if enough else f"\n{cur_icon(cur)} Buy more from <b>Wallet → Buy {cur_key(cur).title()}</b>."))
     if note:
         text += f"\n\n{e('INFO')} {esc(note)}"
     rows_rich = [("Service", esc(spec["label"])), ("Quantity", what), ("Cost", money(coins, cur)),
@@ -2176,8 +2230,8 @@ def review_screen(draft: dict, balance: int, note: str | None = None) -> Screen:
     rich = rich_card("REPORT", "Review Your Order", rows_rich, [f"<code>{esc(draft['link'])}</code>"],
                      "Confirm only if the link is public and correct." if enough else f"Insufficient {cur_key(cur)} — need {money(coins - balance, cur)} more.")
     first = ([btn(f"Confirm & Pay {coins} {cur_plain(cur)}", "ord:ok", icon="CHECK", style="success")] if enough
-             else [btn("Buy Gems" if cur_key(cur) == "gems" else "Earn Coins", "dep" if cur_key(cur) == "gems" else "profile",
-                       icon="GEM" if cur_key(cur) == "gems" else "BONUS", style="success")])
+             else [btn(f"Buy {cur_key(cur).title()}", f"dep:m:{cur_key(cur)}", icon="GEM" if cur_key(cur) == "gems" else "COINS",
+                       style="success")])
     change = btn("Comments", "ord:com", icon="EDIT") if draft.get("comments") else btn("Quantity", "ord:qty", icon="EDIT")
     return Screen(text, kb(first, [change, btn("Link", "ord:link", icon="LINK")], cancel_btn()), rich)
 
@@ -2308,42 +2362,58 @@ def wallet_screen(user: dict, ledger: list[dict]) -> Screen:
     rich = rich_card("WALLET", "Your Wallet", rich_rows or None,
                      [f"<b>{re_('COINS')} Coins:</b> {fmt_num(user.get('coins', 0))} · <b>{re_('GEM')} Gems:</b> {fmt_num(user.get('gems', 0))}"])
     return Screen(text, kb(*zigzag([
-        btn("Buy Gems", "dep", icon="GEM", style="success"),
-        btn("Redeem Code", "redeem", icon="REDEEM", style="primary"), btn("Daily Bonus", "bonus", icon="BONUS", style="danger"),
+        btn("Buy Gems", "dep:m:gems", icon="GEM", style="success"), btn("Buy Coins", "dep:m:coins", icon="COINS", style="primary"),
+        btn("Redeem Code", "redeem", icon="REDEEM", style="primary"),
+        btn("Daily Bonus", "bonus", icon="BONUS", style="danger"),
         btn("Main Menu", "home", icon="HOME", style="danger"),
     ])), rich)
 
 
-def deposit_menu_screen() -> Screen:
-    text = (title("GEM", "Buy Gems") + f"{e('GEM')} Gems unlock premium services (Instagram likes, Telegram members…).\n\n"
-            f"{e('DOWN')} Choose how you want to pay:")
-    return Screen(text, kb([btn("UPI / Bank", "dep:u", icon="UPI", style="success"), btn("Telegram Stars", "dep:s", icon="STARS", style="primary")],
-                           [btn("Back", "wallet", icon="BACK", style="danger")]))
+def deposit_menu_screen(cur: str | None = None) -> Screen:
+    if cur not in CURRENCIES:  # what to buy
+        text = (title("WALLET", "Top Up") +
+                f"{e('GEM')} <b>Gems</b> — premium services (Instagram likes, Telegram members…)\n"
+                f"{e('COINS')} <b>Coins</b> — everyday services (views…), also earned free from bonus & referrals\n\n"
+                f"{e('DOWN')} What do you want to buy?")
+        return Screen(text, kb([btn("Buy Gems", "dep:m:gems", icon="GEM", style="success"),
+                                btn("Buy Coins", "dep:m:coins", icon="COINS", style="primary")],
+                               [btn("Back", "wallet", icon="BACK", style="danger")]))
+    icon = "GEM" if cur == "gems" else "COINS"
+    text = title(icon, f"Buy {cur.title()}") + f"{e('DOWN')} Choose how you want to pay:"
+    rows = []
+    if packages(cur, "upi"):
+        rows.append(btn("UPI / Bank", f"dep:u:{cur}", icon="UPI", style="success"))
+    if packages(cur, "stars"):
+        rows.append(btn("Telegram Stars", f"dep:s:{cur}", icon="STARS", style="primary"))
+    if not rows:
+        text += f"\n\n{e('WARN')} No packages available right now."
+    return Screen(text, kb(rows or None, [btn("Back", "dep", icon="BACK", style="danger")]))
 
 
-def deposit_packages_screen(method: str) -> Screen:
+def deposit_packages_screen(method: str, cur: str = "gems") -> Screen:
     stars = method == "stars"
-    pk = cfg("star_packages") if stars else cfg("coin_packages")
+    pk = packages(cur, method)
     unit = "⭐" if stars else C.currency
-    text = (title("STARS" if stars else "UPI", "Pay With Telegram Stars" if stars else "Pay With UPI")
-            + (f"{e('STARS')} You'll send Stars to our team; gems are added after approval.\n\n" if stars else f"{esc(C.deposit_info)}\n\n")
+    text = (title("STARS" if stars else "UPI", f"Buy {cur.title()} · {'Telegram Stars' if stars else 'UPI'}")
+            + (f"{e('STARS')} You'll send Stars to our team; {cur} are added after approval.\n\n" if stars else f"{esc(C.deposit_info)}\n\n")
             + f"{e('DOWN')} Pick a package:")
-    rows = [[btn(f"{g:,} gems · {p:,} ⭐" if stars else f"{g:,} gems · {unit}{p:,}", f"dep:{'sp' if stars else 'p'}:{i}", icon="GEM")]
-            for i, (g, p) in enumerate(pk)]
-    return Screen(text, kb(*rows, [btn("Back", "dep", icon="BACK", style="danger")]))
+    rows = [[btn(f"{a:,} {cur} · {p:,} ⭐" if stars else f"{a:,} {cur} · {unit}{p:,}", f"dep:{'sp' if stars else 'p'}:{cur}:{i}",
+                 icon="GEM" if cur == "gems" else "COINS")] for i, (a, p) in enumerate(pk)]
+    return Screen(text, kb(*rows, [btn("Back", f"dep:m:{cur}", icon="BACK", style="danger")]))
 
 
 def deposit_pay_screen(dep: dict, error: str | None = None) -> Screen:
     left = fmt_left(aware(dep["expires_at"]) - utcnow())
     stars = dep.get("method") == "stars"
-    head = title("STARS" if stars else "DEPOSIT", f"Order #{dep['deposit_id']}") + f"{e('GEM')} Package: <b>{dep['coins']:,} gems</b>\n"
+    head = (title("STARS" if stars else "DEPOSIT", f"Order #{dep['deposit_id']}")
+            + f"{cur_icon(dep.get('currency'))} Package: <b>{money(dep['coins'], dep.get('currency'))}</b>\n")
     if stars:
         contact = C.stars_contact
         handle = "@" + contact.rstrip("/").split("/")[-1] if "t.me/" in contact else contact
         text = (head + f"{e('STARS')} Pay: <b>{dep['price']:,} Telegram Stars</b>\n\n"
                 f"1️⃣ Open <b>{esc(handle)}</b> and send <b>{dep['price']:,} ⭐</b> (gift Stars / Star gift).\n"
                 f"2️⃣ Send the <b>screenshot</b> here, or tap <b>I've Sent the Stars</b>.\n\n"
-                f"{e('TIME')} Expires in <b>{left}</b>. Gems are added once an admin approves.")
+                f"{e('TIME')} Expires in <b>{left}</b>. {cur_key(dep.get('currency')).title()} are added once an admin approves.")
         rows = [[btn(f"Send Stars to {handle}", url=contact, icon="STARS", style="primary")],
                 [btn("I've Sent the Stars", "dep:sent", icon="CHECK", style="success")]]
     else:
@@ -2359,8 +2429,8 @@ def deposit_pay_screen(dep: dict, error: str | None = None) -> Screen:
 
 
 def deposit_sent_screen(dep: dict) -> Screen:
-    text = (title("CHECK", "Request Received") + f"Order <code>#{dep['deposit_id']}</code> · <b>{dep['coins']:,} gems</b>\n\n"
-            f"{e('LOADING')} An admin is verifying your payment. You'll get a message the moment gems are added.")
+    text = (title("CHECK", "Request Received") + f"Order <code>#{dep['deposit_id']}</code> · <b>{money(dep['coins'], dep.get('currency'))}</b>\n\n"
+            f"{e('LOADING')} An admin is verifying your payment. You'll get a message the moment it's added.")
     return Screen(text, kb([btn("Wallet", "wallet", icon="WALLET")], home_btn()))
 
 
@@ -2460,7 +2530,7 @@ def admin_screen(st: dict, maintenance: bool) -> Screen:
         [btn(f"Deposits ({st['deposits_review']})", "a:deps", icon="DEPOSIT", style="success")],
         [btn("Services", "a:sv", icon="SERVICE", style="primary"), btn("Channels", "a:ch", icon="JOIN")],
         [btn("Admins", "a:ad", icon="ADMIN")],
-        [btn("Bot Settings", "a:cf", icon="SETTING"), btn("Gem Packages", "a:pk", icon="GEM")],
+        [btn("Bot Settings", "a:cf", icon="SETTING"), btn("Packages & Pricing", "a:pk", icon="GEM")],
         [btn("Find User", "a:find", icon="SEARCH"), btn("Redeem Codes", "a:rc", icon="REDEEM")],
         [btn("Broadcast", "a:bc", icon="BROADCAST"),
          btn(f"Maintenance: {'ON' if maintenance else 'OFF'}", "a:mt", icon="MAINTENANCE", style="danger" if maintenance else None)],
@@ -2792,18 +2862,36 @@ def admin_config_screen(note: str | None = None) -> Screen:
     return Screen(text, kb(*rows, [btn("Back", "a", icon="BACK", style="danger")]))
 
 
+PACK_TITLES = {("gems", "upi"): "💎 Gems · UPI", ("gems", "stars"): "💎 Gems · Stars",
+               ("coins", "upi"): "🪙 Coins · UPI", ("coins", "stars"): "🪙 Coins · Stars"}
+
+
 def admin_packages_screen(note: str | None = None) -> Screen:
-    upi, stars = cfg("coin_packages"), cfg("star_packages")
-    lines = ([f"<b>{e('UPI')} UPI packages</b>"] + [f"{i + 1}. {g:,} gems → {C.currency}{p:,}" for i, (g, p) in enumerate(upi)]
-             + ["", f"<b>{e('STARS')} Stars packages</b>"] + [f"{i + 1}. {g:,} gems → {p:,} ⭐" for i, (g, p) in enumerate(stars)])
-    text = title("GEM", "Gem Packages") + "\n".join(lines) + f"\n\n{e('INFO')} Stars are sent manually to {esc(C.stars_contact)}."
+    lines = []
+    for (cur, method), label in PACK_TITLES.items():
+        pk = packages(cur, method)
+        unit = "⭐" if method == "stars" else C.currency
+        prices = ", ".join(f"{a:,}→{p:,}{unit}" if method == "stars" else f"{a:,}→{unit}{p:,}" for a, p in pk) or "—"
+        lines.append(f"<b>{label}</b> ({len(pk)})\n   {esc(prices)}")
+    text = (title("GEM", "Packages & Pricing") + "\n\n".join(lines)
+            + f"\n\n{e('INFO')} Tap a list to add or remove packages. Stars go to {esc(C.stars_contact)}.")
     if note:
         text += f"\n\n{e('INFO')} {esc(note)}"
-    rows = ([[btn(f"Remove UPI {g:,}", f"a:pk:del:{i}", icon="CROSS", style="danger")] for i, (g, _) in enumerate(upi)]
-            + [[btn(f"Remove ⭐ {g:,}", f"a:pk:sdel:{i}", icon="CROSS", style="danger")] for i, (g, _) in enumerate(stars)])
-    return Screen(text, kb([btn("Add UPI Package", "a:pk:add", icon="PLUS", style="success"),
-                            btn("Add Stars Package", "a:pk:sadd", icon="STARS", style="success")], *rows,
-                           [btn("Back", "a", icon="BACK", style="danger")]))
+    buttons = [btn(label, f"a:pk:v:{cur}:{method}", style="success" if cur == "gems" else "primary") for (cur, method), label in PACK_TITLES.items()]
+    return Screen(text, kb(buttons[:2], buttons[2:], [btn("Back", "a", icon="BACK", style="danger")]))
+
+
+def admin_pack_list_screen(cur: str, method: str, note: str | None = None) -> Screen:
+    pk = packages(cur, method)
+    unit = "⭐" if method == "stars" else C.currency
+    lines = [f"{i + 1}. <b>{a:,} {cur}</b> → " + (f"{p:,} ⭐" if method == "stars" else f"{unit}{p:,}") for i, (a, p) in enumerate(pk)]
+    text = (title("GEM" if cur == "gems" else "COINS", PACK_TITLES[(cur, method)].split(" ", 1)[1]) + ("\n".join(lines) or "No packages — users can't buy this way.")
+            + f"\n\n{e('INFO')} Adding a package with the same amount replaces its price.")
+    if note:
+        text += f"\n\n{e('INFO')} {esc(note)}"
+    rows = [[btn(f"Remove {a:,} {cur}", f"a:pk:d:{cur}:{method}:{i}", icon="CROSS", style="danger")] for i, (a, _) in enumerate(pk)]
+    return Screen(text, kb([btn("Add / Change Price", f"a:pk:a:{cur}:{method}", icon="PLUS", style="success")], *rows,
+                           [btn("All Packages", "a:pk", icon="BACK", style="danger")]))
 
 
 def admin_field_prompt(kind: str, field: str, error: str | None = None) -> Screen:
@@ -3421,18 +3509,23 @@ async def cb_wallet(update, context, args):
 async def cb_deposit(update, context, args):
     uid = update.effective_user.id
     act = args[0] if args else ""
+    rest = args[1:]
+    cur = rest.pop(0) if rest and rest[0] in CURRENCIES else "gems"   # old buttons without currency = gems
+    if act == "m":
+        clear_await(context)
+        await render(update, context, deposit_menu_screen(cur))
+        return None
     if act in ("u", "s"):
         clear_await(context)
-        await render(update, context, deposit_packages_screen("stars" if act == "s" else "upi"))
+        await render(update, context, deposit_packages_screen("stars" if act == "s" else "upi", cur))
         return None
-    if act in ("p", "sp") and len(args) > 1 and args[1].isdigit():
-        stars = act == "sp"
-        pk = cfg("star_packages") if stars else cfg("coin_packages")
-        idx = int(args[1])
+    if act in ("p", "sp") and rest and rest[0].isdigit():
+        method = "stars" if act == "sp" else "upi"
+        pk, idx = packages(cur, method), int(rest[0])
         if idx >= len(pk):
             return "Package not available.", True
-        gems, price = pk[idx]
-        dep = await store.create_deposit(uid, int(gems), int(price), C.deposit_expiry_minutes, method="stars" if stars else "upi")
+        amount, price = pk[idx]
+        dep = await store.create_deposit(uid, int(amount), int(price), C.deposit_expiry_minutes, method=method, currency=cur)
         set_await(context, "deposit_proof", deposit_id=dep["deposit_id"])
         await render(update, context, deposit_pay_screen(dep))
         return None
@@ -4509,42 +4602,53 @@ async def in_config_field(update, context, state, text):
 @route("a:pk", admin=True)
 async def cb_admin_packages(update, context, args):
     act = args[0] if args else ""
-    if act in ("add", "sadd"):
-        stars = act == "sadd"
-        set_await(context, "pkg_add", stars=stars, admin=True)
-        unit = "Stars" if stars else f"price in {esc(C.currency)}"
-        await render(update, context, prompt_screen("GEM", "Add Stars Package" if stars else "Add UPI Package",
-                                                    f"Send <b>gems</b> and <b>{unit}</b> separated by a space.\n"
-                                                    f"Example: <code>500 450</code> → 500 gems for 450 {'⭐' if stars else esc(C.currency)}",
-                                                    cancel="a:pk"))
+    # legacy buttons: add/sadd/del/sdel = gems lists
+    legacy = {"add": ("a", "gems", "upi"), "sadd": ("a", "gems", "stars"), "del": ("d", "gems", "upi"), "sdel": ("d", "gems", "stars")}
+    if act in legacy:
+        act, cur, method = legacy[act]
+        idx = args[1] if len(args) > 1 else ""
+    elif act in ("v", "a", "d") and len(args) >= 3 and args[1] in CURRENCIES and args[2] in ("upi", "stars"):
+        cur, method = args[1], args[2]
+        idx = args[3] if len(args) > 3 else ""
+    else:
+        clear_await(context)
+        await render(update, context, admin_packages_screen())
+        return None
+    if act == "a":
+        set_await(context, "pkg_add", cur=cur, method=method, admin=True)
+        unit = "Stars" if method == "stars" else f"price in {esc(C.currency)}"
+        await render(update, context, prompt_screen("PLUS", f"Add {PACK_TITLES[(cur, method)].split(' ', 1)[1]} Package",
+                                                    f"Send <b>{cur}</b> and <b>{unit}</b> separated by a space.\n"
+                                                    f"Example: <code>500 45</code> → 500 {cur} for 45 {'⭐' if method == 'stars' else esc(C.currency)}",
+                                                    cancel=f"a:pk:v:{cur}:{method}"))
         return None
     clear_await(context)
     note = None
-    if act in ("del", "sdel") and len(args) > 1 and args[1].isdigit():
-        key = "star_packages" if act == "sdel" else "coin_packages"
-        pk = [list(x) for x in cfg(key)]
-        if int(args[1]) < len(pk):
-            gems, _ = pk.pop(int(args[1]))
-            CONFIG[key] = pk
+    if act == "d" and idx.isdigit():
+        pk = packages(cur, method)
+        if int(idx) < len(pk):
+            amount, _ = pk.pop(int(idx))
+            CONFIG[PACK_KEYS[(cur, method)]] = pk
             await save_config()
-            note = f"Removed the {gems:,} gems package."
-    await render(update, context, admin_packages_screen(note))
+            note = f"Removed the {amount:,} {cur} package."
+    await render(update, context, admin_pack_list_screen(cur, method, note))
 
 
 @on_input("pkg_add")
 async def in_package_add(update, context, state, text):
-    key = "star_packages" if state.get("stars") else "coin_packages"
+    cur = state.get("cur") or "gems"
+    method = state.get("method") or ("stars" if state.get("stars") else "upi")
     nums = re.findall(r"\d+", text.replace(",", ""))
     if len(nums) != 2 or int(nums[0]) <= 0 or int(nums[1]) <= 0:
-        return await render(update, context, prompt_screen("GEM", "Add Package", "Send gems and price, e.g. <code>500 450</code>.",
-                                                           "Send exactly two positive numbers.", "a:pk"))
-    pk = [list(x) for x in cfg(key) if int(x[0]) != int(nums[0])]
+        return await render(update, context, prompt_screen("PLUS", "Add Package", f"Send {cur} and price, e.g. <code>500 45</code>.",
+                                                           "Send exactly two positive numbers.", f"a:pk:v:{cur}:{method}"))
+    pk = [x for x in packages(cur, method) if int(x[0]) != int(nums[0])]
     pk.append([int(nums[0]), int(nums[1])])
-    CONFIG[key] = sorted(pk)[:12]
+    CONFIG[PACK_KEYS[(cur, method)]] = sorted(pk)[:12]
     await save_config()
     clear_await(context)
-    unit = "⭐" if state.get("stars") else C.currency
-    await render(update, context, admin_packages_screen(f"Added {int(nums[0]):,} gems for {int(nums[1]):,} {unit}."))
+    unit = "⭐" if method == "stars" else C.currency
+    await render(update, context, admin_pack_list_screen(cur, method, f"Saved: {int(nums[0]):,} {cur} for {int(nums[1]):,} {unit}."))
 
 
 # ======================================================================================
