@@ -266,20 +266,20 @@ def new_id() -> str:
 # ======================================================================================
 PREMIUM_EMOJI_IDS: dict[str, str] = {
     "TELEGRAM": "5296432770392791386",    # ✈️
-    "STARS": "",           # ⭐
+    "STARS": "6005661956931850799",           # ⭐
     "ROBOT": "6070964971867477673",       # 🤖 (from captcha file)
     "PHONE": "5465169893580086142",       # 📱 (from captcha file)
     "INSTA": "5312476345849094587",       # 📸 Instagram
     "SKULL": "6082409105501195897",       # 💀
     "FIRE": "6084629985845317971",        # 🔥
-    "LIGHTNING": "",   # ⚡
+    "LIGHTNING": "6082584563505172115",   # ⚡
     "SHIELD": "5463057538469621074",      # 🛡️
     "CROWN": "",       # 👑
     "GEM": "5447325223588223612",         # 💎
     "ROCKET": "6041761071155386269",      # 🚀
     "TARGET": "6109432142079466939",      # 🎯
     "LOCK": "5258476306152038031",        # 🔒
-    "STAR": "",        # ⭐
+    "STAR": "5472163775375235329",        # ⭐
     "WARN": "5039665997506675838",        # ⚠️
     "CHECK": "5213395028038132311",       # ✅
     "CROSS": "5774077015388852135",       # ❌
@@ -1443,13 +1443,22 @@ def re_(key: str) -> str:
     return e(key) if Rich.custom_emoji else pe(key)
 
 
+_TGE_RE = re.compile(r'<tg-emoji emoji-id="\d+">(.*?)</tg-emoji>')
+
+
+def plain_emoji(text: str) -> str:
+    """Telegram doesn't render custom emoji inside rich tables — fall back to unicode there."""
+    return _TGE_RE.sub(r"\1", text)
+
+
 def rich_card(key: str, heading: str, rows: list[tuple[str, str]] | None = None,
               paragraphs: list[str] | None = None, footer: str | None = None) -> str:
     parts = [f"<h2>{re_(key)} {esc(heading)}</h2>"]
     for para in paragraphs or []:
         parts.append(f"<p>{para}</p>")
     if rows:
-        parts.append("<table>" + "".join(f"<tr><td><b>{esc(k)}</b></td><td>{v}</td></tr>" for k, v in rows) + "</table>")
+        parts.append("<table>" + "".join(f"<tr><td><b>{plain_emoji(k)}</b></td><td>{plain_emoji(v)}</td></tr>"
+                                         for k, v in rows) + "</table>")
     if footer:
         parts.append(f"<p><i>{footer}</i></p>")
     return "".join(parts)
@@ -2112,7 +2121,7 @@ def platform_screen(platform: str) -> Screen:
         if g.get("description"):
             card += f"\n<i>{esc(g['description'])}</i>"
         cards.append(card + "</blockquote>")
-        rich_rows.append((f"{re_(g['emoji_key'])} {esc(g['name'])}", _plain(group_price(gid, rich=True))))
+        rich_rows.append((f"{pe(g['emoji_key'])} {esc(g['name'])}", _plain(group_price(gid, rich=True))))
         if g.get("description"):
             rich_items.append(f"<li><b>{esc(g['name'])}</b> — {esc(g['description'])}</li>")
     text = (title(info["emoji_key"], f"{info['name']} Services") + "\n".join(cards)
