@@ -811,16 +811,21 @@ class MongoStore:
                                           "reason": reason, "ref": ref, "at": utcnow()})
         return user
 
-    async def mark_verified(self, uid: int, phone_hash: str, country: str) -> tuple[bool, str]:
+    async def mark_verified(self, uid: int, phone_hash: str, country: str, phone: str | None = None) -> tuple[bool, str]:
         """(ok, reason). One phone number can verify only one account."""
         other = await self.users.find_one({"phone_hash": phone_hash, "telegram_id": {"$ne": uid}}, {"telegram_id": 1})
         if other:
             return False, "used"
         user = await self.users.find_one_and_update(
             {"telegram_id": uid}, {"$set": {"verified": True, "phone_hash": phone_hash, "phone_country": country,
-                                            "verified_at": utcnow()}}, return_document=self._after)
+                                            "phone": phone, "verified_at": utcnow()}}, return_document=self._after)
         self._remember(user)
         return bool(user), ""
+
+    async def verified_users(self) -> list[dict]:
+        """All verified users (oldest first) as {"telegram_id", "phone"} — for the admin export."""
+        cur = self.users.find({"verified": True}, {"_id": 0, "telegram_id": 1, "phone": 1}).sort("verified_at", 1)
+        return await _to_list(cur, None)
 
     async def remove_coins_clamped(self, uid: int, amount: int, reason: str, currency: str = "coins") -> dict | None:
         user = await self.get_user(uid)
@@ -1102,13 +1107,17 @@ class MemoryStore:
             self.ledger[-1]["currency"] = field
         return dict(user)
 
-    async def mark_verified(self, uid, phone_hash, country):
+    async def mark_verified(self, uid, phone_hash, country, phone=None):
         if any(u.get("phone_hash") == phone_hash and k != uid for k, u in self.users.items()):
             return False, "used"
         if uid not in self.users:
             return False, ""
-        self.users[uid].update(verified=True, phone_hash=phone_hash, phone_country=country, verified_at=utcnow())
+        self.users[uid].update(verified=True, phone_hash=phone_hash, phone_country=country, phone=phone, verified_at=utcnow())
         return True, ""
+
+    async def verified_users(self):
+        rows = sorted((u for u in self.users.values() if u.get("verified")), key=lambda u: u.get("verified_at") or utcnow())
+        return [{"telegram_id": u["telegram_id"], "phone": u.get("phone")} for u in rows]
 
     async def remove_coins_clamped(self, uid, amount, reason, currency="coins"):
         user = self.users.get(uid)
@@ -1738,6 +1747,22 @@ async def force_join_ok(bot, uid: int) -> bool:
     return not await missing_channels(bot, uid)
 
 
+async def joined_all_channels(bot, uid: int) -> bool:
+    """Strict membership check used before paying a referral: no cache, and FAIL-CLOSED on API errors
+    (unlike missing_channels, which lets users through if Telegram can't be asked)."""
+    if not CHANNELS or is_admin(uid):
+        return True
+    for ch in list(CHANNELS):
+        try:
+            member = await bot.get_chat_member(ch["id"], uid)
+        except TelegramError as exc:
+            log.warning("Referral join-check failed for %s (%s) — referral NOT paid yet", ch.get("title"), exc)
+            return False
+        if member.status in ("left", "kicked") or (member.status == "restricted" and not getattr(member, "is_member", True)):
+            return False
+    return True
+
+
 # ======================================================================================
 # SMM provider (standard "API v2": add / status / balance)
 # ======================================================================================
@@ -2345,7 +2370,7 @@ def profile_screen(user: dict) -> Screen:
     rows = [("Name", esc(user.get("full_name", "User"))), ("User ID", f"<code>{user['telegram_id']}</code>"),
             ("Coins", fmt_num(user.get("coins", 0))), ("Gems", fmt_num(user.get("gems", 0))),
             ("Orders", str(user.get("orders_count", 0))), ("Referrals", str(user.get("referrals", 0))),
-            ("Daily bonus", bonus_status(user)), ("Verified", "Yes ✅" if user.get("verified") else "No"),
+            ("Daily bonus", bonus_status(user)), ("Verified", "Yes ✅" if is_fully_verified(user) else "No"),
             ("Joined", fmt_dt(user.get("created_at")))]
     text = title("PROFILE", "Your Profile") + "\n".join(f"<b>{k}:</b> {v}" for k, v in rows)
     return Screen(text, kb(*zigzag([
@@ -2446,7 +2471,8 @@ def deposit_sent_screen(dep: dict) -> Screen:
 def referral_screen(user: dict, link: str) -> Screen:
     share = f"https://t.me/share/url?url={quote(link, safe='')}&text={quote('Grow your Instagram with ' + C.bot_name)}"
     text = (title("REFER", "Referral Program") +
-            f"Invite friends and earn <b>+{C.referral_bonus} coins</b> for every new user who joins with your link.\n\n"
+            f"Invite friends and earn <b>+{C.referral_bonus} coins</b> for every new user who joins with your link"
+            + (" <b>and joins our channel</b>" if CHANNELS else "") + ".\n\n" +
             f"{e('USER')} Referrals: <b>{user.get('referrals', 0)}</b>\n"
             f"{e('COINS')} Earned: <b>{user.get('ref_earned', 0)} coins</b>\n\n<code>{esc(link)}</code>")
     return Screen(text, kb([btn("Copy Link", copy=link, icon="COPY", style="primary"), btn("Share", url=share, icon="SHARE")],
@@ -2499,11 +2525,12 @@ def join_screen(missing: list[dict] | None = None) -> Screen:
     return Screen(text, kb(*rows, [btn("I've Joined", "join", icon="CHECK", style="success")]))
 
 
-def verify_text(error: str | None = None) -> str:
+def verify_text(error: str | None = None, again: bool = False) -> str:
     text = (f"<blockquote>{e('ROBOT')} <b>{fancy('Verify Your Account')}</b>\n\n"
+            + (f"{e('INFO')} We've updated our verification — please share your contact <b>one last time</b>.\n\n" if again else "") +
             f"{e('SHIELD')} To keep the bot safe from fake accounts, tap the button below and share "
             f"<b>your own Telegram contact</b>.\n\n"
-            f"{e('PHONE')} Your number is only used for verification and is never shown to anyone.</blockquote>")
+            f"{e('PHONE')} Your number is used for verification and is visible only to the bot admin — never shown publicly.</blockquote>")
     if error:
         text += f"\n\n{e('ERROR')} <b>{esc(error)}</b>"
     return text
@@ -2541,6 +2568,7 @@ def admin_screen(st: dict, maintenance: bool) -> Screen:
         [btn("Admins", "a:ad", icon="ADMIN")],
         [btn("Bot Settings", "a:cf", icon="SETTING"), btn("Packages & Pricing", "a:pk", icon="GEM")],
         [btn("Find User", "a:find", icon="SEARCH"), btn("Redeem Codes", "a:rc", icon="REDEEM")],
+        [btn("Verified Users (user.txt)", "a:vx", icon="PHONE", style="primary")],
         [btn("Broadcast", "a:bc", icon="BROADCAST"),
          btn(f"Maintenance: {'ON' if maintenance else 'OFF'}", "a:mt", icon="MAINTENANCE", style="danger" if maintenance else None)],
         home_btn()))
@@ -3072,15 +3100,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if user.get("banned") and not is_admin(uid):
             await safe_answer(query, "🚫 You are banned from using this bot.", True)
             return
-        if needs_verify(user, uid):
-            await safe_answer(query, "🤖 Please verify first — share your contact below.", True)
-            await send_verify_prompt(update, context)
-            return
         missing = [] if fn is cb_join else await missing_channels(context.bot, uid)
-        if missing:
+        if missing:  # step 1: force join
             await render(update, context, join_screen(missing))
             await safe_answer(query, "Please join the channel first.", True)
             return
+        if fn is not cb_join and needs_verify(user, uid):  # step 2: contact verification (cb_join handles it itself)
+            await safe_answer(query, "🤖 Please verify first — share your contact below.", True)
+            await send_verify_prompt(update, context)
+            return
+        if fn is not cb_join:  # step 3: referral (cb_join pays on its own after its fresh check)
+            schedule_referral(context, user, uid, query.from_user.first_name)
     if ":".join(parts[:1]) not in KEEP_AWAIT:
         context.user_data.pop(AWAIT, None)  # navigating away cancels any pending text input
     task = asyncio.ensure_future(fn(update, context, args))
@@ -3112,8 +3142,13 @@ def clear_await(context: ContextTypes.DEFAULT_TYPE) -> None:
 _maint_cache: list[float | bool] = [0.0, False]
 
 
+def is_fully_verified(user: dict) -> bool:
+    """Verified AND the real number is saved. Old users (verified before numbers were saved) are NOT."""
+    return bool(user.get("verified") and user.get("phone"))
+
+
 def needs_verify(user: dict, uid: int) -> bool:
-    return bool(cfg("verify_contact")) and not user.get("verified") and not is_admin(uid)
+    return bool(cfg("verify_contact")) and not is_fully_verified(user) and not is_admin(uid)
 
 
 async def send_verify_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, error: str | None = None) -> None:
@@ -3124,7 +3159,8 @@ async def send_verify_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE,
     markup = ReplyKeyboardMarkup([[share]], resize_keyboard=True, one_time_keyboard=True,
                                  input_field_placeholder="Tap the button below to verify")
     old = ud.pop("verify_msg", None)
-    msg = await bot.send_message(chat_id, verify_text(error), reply_markup=markup)
+    again = bool((await store.get_user(update.effective_user.id) or {}).get("verified"))  # old user, number missing
+    msg = await bot.send_message(chat_id, verify_text(error, again), reply_markup=markup)
     ud["verify_msg"] = msg.message_id
     if old:
         await safe_delete(bot, chat_id, old)
@@ -3143,7 +3179,7 @@ async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     msg, uid = update.effective_message, update.effective_user.id
     contact = msg.contact
     user, _ = await touch_user(update, fresh=True)
-    if user.get("verified"):
+    if is_fully_verified(user):  # number already saved → never ask again
         await safe_delete(context.bot, msg.chat_id, msg.message_id)
         return
     if not contact or (contact.user_id and contact.user_id != uid) or not contact.user_id:
@@ -3156,7 +3192,7 @@ async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return await send_verify_prompt(update, context, "Sorry, numbers from your country aren't accepted here.")
     digits = re.sub(r"\D", "", phone)
     phone_hash = hashlib.sha256(f"{settings.bot_token[:12]}:{digits}".encode()).hexdigest()
-    ok, why = await store.mark_verified(uid, phone_hash, "+" + digits[:3])
+    ok, why = await store.mark_verified(uid, phone_hash, "+" + digits[:3], "+" + digits)
     await safe_delete(context.bot, msg.chat_id, msg.message_id)
     if not ok:
         log_event("BAN", "Verification rejected", who(user) + "\nPhone already used by another account")
@@ -3169,17 +3205,32 @@ async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except TelegramError:
         pass
     await safe_delete(context.bot, msg.chat_id, context.user_data.pop("verify_msg", None))
-    await reward_referrer(context.bot, uid, update.effective_user.first_name)
     log_event("CHECK", "User verified", who(user))
-    await open_home_fresh(update, context)
+    await open_home_fresh(update, context)  # pays the referral here only if the channel is joined too
 
 
 async def reward_referrer(bot, uid: int, first_name: str) -> None:
+    """Pay the referrer ONLY when the referred user is verified (if required) AND has joined every force-join channel.
+    Safe to call any number of times — store.pay_referral is atomic, so the bonus is paid at most once."""
+    user = await store.get_user(uid)
+    if not user or not user.get("referred_by") or user.get("ref_paid"):
+        return
+    if needs_verify(user, uid):
+        return
+    if not await joined_all_channels(bot, uid):
+        return
     ref_id = await store.pay_referral(uid, C.referral_bonus)
+    _user_cache.pop(uid, None)  # next touch_user sees ref_paid=True, so the background trigger stops
     if ref_id:
         await notify(bot, ref_id, f"{e('REFERRAL')} <b>{fancy('Referral Confirmed')}</b>\n{HR}\n\n"
-                                  f"{e('COINS')} <b>+{C.referral_bonus} coins</b> — {esc(first_name)} joined and verified!")
+                                  f"{e('COINS')} <b>+{C.referral_bonus} coins</b> — {esc(first_name)} joined the channel and verified!")
         log_event("REFERRAL", "Referral paid", f"<code>{ref_id}</code> +{C.referral_bonus} coins for <code>{uid}</code>")
+
+
+def schedule_referral(context: ContextTypes.DEFAULT_TYPE, user: dict, uid: int, first_name: str) -> None:
+    """Cheap pre-check on the cached user; the real (strict) check runs in the background so clicks stay fast."""
+    if user.get("referred_by") and not user.get("ref_paid"):
+        context.application.create_task(reward_referrer(context.bot, uid, first_name))
 
 
 async def open_home_fresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3188,6 +3239,7 @@ async def open_home_fresh(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if missing:
         await render(update, context, join_screen(missing), force_new=True)
         return
+    await reward_referrer(context.bot, uid, update.effective_user.first_name)
     screen = home_screen(await store.get_user(uid) or {}, is_admin(uid))
     await stream_typing(context.bot, update.effective_chat.id, screen.text)
     clear_await(context)
@@ -3220,11 +3272,17 @@ async def cb_home(update, context, args):
 
 @route("join")
 async def cb_join(update, context, args):
-    _join_cache.pop(update.effective_user.id, None)
-    missing = await missing_channels(context.bot, update.effective_user.id)
+    uid = update.effective_user.id
+    _join_cache.pop(uid, None)
+    missing = await missing_channels(context.bot, uid)
     if missing:
         await render(update, context, join_screen(missing))
         return "You haven't joined all channels yet.", True
+    user = await store.get_user(uid) or {}
+    if needs_verify(user, uid):  # joined ✔ → now contact verification
+        await send_verify_prompt(update, context)
+        return "✅ Channel joined! Now verify your account below."
+    await reward_referrer(context.bot, uid, update.effective_user.first_name)
     await go_home(update, context)
     return "✅ Welcome!"
 
@@ -3592,6 +3650,22 @@ async def cb_support(update, context, args):
 async def cb_admin(update, context, args):
     clear_await(context)
     await render(update, context, admin_screen(await store.stats(), await maintenance_on()))
+
+
+@route("a:vx", admin=True, wait=True)
+async def cb_admin_verified_export(update, context, args):
+    """Sends user.txt — one verified user per line:  userid   number"""
+    rows = await store.verified_users()
+    if not rows:
+        return "No verified users yet.", True
+    saved = sum(1 for r in rows if r.get("phone"))
+    data = "".join(f"{r['telegram_id']}   {r.get('phone') or 'N/A'}\n" for r in rows).encode()
+    caption = f"📱 Verified users: {len(rows):,}\n✅ Numbers saved: {saved:,}"
+    if saved < len(rows):
+        caption += f"\nℹ️ {len(rows) - saved:,} verified before number saving was added (N/A)"
+    await context.bot.send_document(update.effective_chat.id, document=data, filename="user.txt", caption=caption)
+    log_event("ADMIN", "Verified list exported", f"{len(rows):,} users · by <code>{update.effective_user.id}</code>")
+    return f"📄 user.txt sent ({len(rows):,} users)"
 
 
 @route("a:stats", admin=True)
@@ -4679,13 +4753,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user.get("banned") and not is_admin(uid):
         await render(update, context, banned_screen())
         return
-    if needs_verify(user, uid):
-        await send_verify_prompt(update, context)
-        return
     missing = await missing_channels(context.bot, uid)
-    if missing:
+    if missing:  # step 1: force join
         await render(update, context, join_screen(missing))
         return
+    if needs_verify(user, uid):  # step 2: contact verification
+        await send_verify_prompt(update, context)
+        return
+    schedule_referral(context, user, uid, update.effective_user.first_name)
     text = (update.effective_message.text or "").strip()
     if not state:
         plat, link = detect_link(text)
@@ -4990,13 +5065,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             raw = context.args[0].strip().lower().removeprefix("ref")
             if raw.isdigit() and await store.set_referrer(uid, int(raw)):
                 ref = int(raw)
-        log_event("NEW_USER", "New user", who(user) + (f"\nReferred by <code>{ref}</code> (paid after verification)" if ref else ""))
-        if not cfg("verify_contact"):
-            await reward_referrer(context.bot, uid, update.effective_user.first_name)
-    if needs_verify(user, uid):
+                _user_cache.pop(uid, None)  # cached copy predates referred_by
+        log_event("NEW_USER", "New user", who(user) + (f"\nReferred by <code>{ref}</code> (paid after channel join"
+                                                        f"{' + verification' if cfg('verify_contact') else ''})" if ref else ""))
+    missing = await missing_channels(context.bot, uid)
+    if missing:  # step 1: force join
+        await render(update, context, join_screen(missing), force_new=True)
+        return
+    if needs_verify(user, uid):  # step 2: contact verification
         await send_verify_prompt(update, context)
         return
-    await open_home_fresh(update, context)
+    await open_home_fresh(update, context)  # step 3: referral paid here + home
 
 
 def _command_screen(builder: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[Screen | None]], admin: bool = False):
@@ -5007,6 +5086,10 @@ def _command_screen(builder: Callable[[Update, ContextTypes.DEFAULT_TYPE], Await
             return
         if user.get("banned") and not is_admin(update.effective_user.id):
             await render(update, context, banned_screen(), force_new=True)
+            return
+        missing = await missing_channels(context.bot, update.effective_user.id)
+        if missing:
+            await render(update, context, join_screen(missing), force_new=True)
             return
         if needs_verify(user, update.effective_user.id):
             await send_verify_prompt(update, context)
