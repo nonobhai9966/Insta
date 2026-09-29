@@ -71,6 +71,39 @@ load_dotenv()
 warnings.filterwarnings("ignore", message=r".*do_api_request.*")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
+
+
+class _SecretRedactionFilter(logging.Filter):
+    """Prevent configured credentials from leaking through application error logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        secrets_to_redact = [os.getenv(name, "") for name in ("BOT_TOKEN", "MONGO_URI", "MONGODB_URI")]
+        secrets_to_redact = [value for value in secrets_to_redact if value]
+        if not secrets_to_redact:
+            return True
+
+        def redact(text: str) -> str:
+            for secret in secrets_to_redact:
+                text = text.replace(secret, "[REDACTED]")
+            return text
+
+        message = record.getMessage()
+        safe_message = redact(message)
+        if safe_message != message:
+            record.msg, record.args = safe_message, ()
+        if record.exc_info:
+            import traceback
+            record.exc_text = redact("".join(traceback.format_exception(*record.exc_info)))
+            record.exc_info = None
+        elif record.exc_text:
+            record.exc_text = redact(record.exc_text)
+        return True
+
+
+_redaction_filter = _SecretRedactionFilter()
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_redaction_filter)
+
 log = logging.getLogger("igbot")
 for noisy in ("httpx", "httpcore", "telegram.ext.Updater"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
